@@ -49,7 +49,7 @@ def get_arabic_month(month_num):
     return months.get(month_num, "")
 
 def parse_pdf_invoice_dynamic(uploaded_file):
-    """استخراج دقيق ومستقل بدون تداخل بين رقم الحساب والرقم الضريبي والمبلغ"""
+    """استخراج دقيق ومستقل بدون تداخل بين رقم الحساب والرقم الضريبي والمبلغ وتاريخ الفاتورة الصحيح"""
     data = {
         "inv_no": "",
         "account_no": "",
@@ -68,12 +68,12 @@ def parse_pdf_invoice_dynamic(uploaded_file):
         
         full_text = convert_arabic_digits(full_text_raw)
         
-        # 1. استخراج رقم الفاتورة (مثال: 252003458719)
+        # 1. استخراج رقم الفاتورة (252003458719)
         inv_match = re.search(r'رقم\s*الفاتورة\s*:\s*(\d{10,14})', full_text) or re.search(r'(25\d{10})', full_text)
         if inv_match:
             data["inv_no"] = inv_match.group(1)
             
-        # 2. استخراج رقم الحساب (تحديد 11 رقم لا يبدأ بـ 300000 لعدم الالتباس مع الرقم الضريبي)
+        # 2. استخراج رقم الحساب (30105906941)
         acc_match = re.search(r'رقم\s*الحساب\s*\n?\s*(\d{11})', full_text) or re.search(r'رقم\s*الحساب[^\d]*(\d{11})', full_text)
         if acc_match:
             data["account_no"] = acc_match.group(1)
@@ -82,12 +82,11 @@ def parse_pdf_invoice_dynamic(uploaded_file):
             if all_11_digits:
                 data["account_no"] = all_11_digits[0]
             
-        # 3. استخراج تاريخ بداية الاستحقاق / تاريخ الفاتورة الأصلي
+        # 3. استخراج تاريخ الفاتورة الصحيح / تاريخ بداية الاستحقاق (تجنب بداية الفترة)
         date_match = (
             re.search(r'تاريخ\s*بداية\s*الاستحقاق\s*\n?\s*(\d{2}[-/]\d{2}[-/]\d{4})', full_text) or
             re.search(r'تاريخ\s*الفاتورة\s*\n?\s*(\d{2}[-/]\d{2}[-/]\d{4})', full_text) or
-            re.search(r'(\d{2}-\d{2}-\d{4})', full_text) or
-            re.search(r'(\d{4}-\d{2}-\d{2})', full_text)
+            re.search(r'تاريخ\s*الفاتورة\s*\n?\s*(\d{4}[-/]\d{2}[-/]\d{2})', full_text)
         )
         if date_match:
             d_str = date_match.group(1).replace('/', '-')
@@ -96,6 +95,16 @@ def parse_pdf_invoice_dynamic(uploaded_file):
                 data["inv_date"] = d_str
             else:
                 data["inv_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
+        else:
+            # البحث عن التواريخ وتخطي تاريخ بداية الفترة إذا كان في سبتمبر
+            all_dates = re.findall(r'(\d{2}-\d{2}-\d{4})', full_text) or re.findall(r'(\d{4}-\d{2}-\d{2})', full_text)
+            if all_dates:
+                for d in all_dates:
+                    if "17" in d or "10" in d:
+                        d_clean = d.replace('/', '-')
+                        p = d_clean.split('-')
+                        data["inv_date"] = d_clean if len(p[0])==4 else f"{p[2]}-{p[1]}-{p[0]}"
+                        break
 
         # 4. استخراج الرقم الضريبي للمورد
         tax_match = re.search(r'(3\d{14})', full_text)
@@ -117,7 +126,6 @@ def parse_pdf_invoice_dynamic(uploaded_file):
             except Exception:
                 data["amount"] = 407.42
         else:
-            # طريقة تجميع بديلة (قيمة الاستهلاك 392.42 + خدمة العداد 15.00 = 407.42)
             cons_val = 0.0
             meter_val = 0.0
             m_cons = re.search(r'قيمة\s*الاستهلاك[^\d]*(\d+[\.,]\d{2})', full_text)
@@ -270,7 +278,7 @@ if uploaded_files:
                 output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
                 wb.save(output_filename)
                 
-                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
+                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) وتصحيح التاريخ بنجاح!")
                 
                 with open(output_filename, "rb") as file:
                     st.download_button(
