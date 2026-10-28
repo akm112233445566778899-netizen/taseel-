@@ -6,13 +6,25 @@ import re
 import pdfplumber
 
 st.set_page_config(
-    page_title="أداة تفريغ العهود - 2026",
-    page_icon="🏛️",
+    page_title="نظام تسهيل - تفريغ العهود 2026",
+    page_icon="⚡",
     layout="centered"
 )
 
-st.title("🏛️ أداة تفريغ العهود وإصدار أمر الصرف")
-st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - نموذج الإدارة العامة 2026")
+# --- عرض الشعار واسم البرنامج "تسهيل" أعلى الواجهة ---
+if os.path.exists("logo.png"):
+    col_logo, col_title = st.columns([1, 3.5])
+    with col_logo:
+        st.image("logo.png", width=120)
+    with col_title:
+        st.title("⚡ نظام تسهيل")
+        st.subheader("أداة تفريغ العهود وإصدار أمر الصرف")
+        st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - نموذج الإدارة العامة 2026")
+else:
+    st.title("⚡ نظام تسهيل")
+    st.subheader("أداة تفريغ العهود وإصدار أمر الصرف")
+    st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - نموذج الإدارة العامة 2026")
+
 st.divider()
 
 def convert_arabic_digits(text):
