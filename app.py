@@ -1,5 +1,4 @@
-
-   import streamlit as st
+import streamlit as st
 import openpyxl
 from datetime import datetime
 import os
@@ -18,48 +17,58 @@ st.title("🏛️ أداة تفريغ العهود وإصدار أمر الصر�
 st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - نموذج الإدارة العامة 2026")
 st.divider()
 
+# جلب مفتاح API من Secrets
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-def process_file_to_image(uploaded_file):
-    """تحويل ملف الـ PDF أو الصورة إلى كائن صورة جاهز للتحليل"""
+def process_uploaded_file(uploaded_file):
+    """معالجة الملف المرفوع سواء كان صورة أو PDF واستخراج محتواه للذكاء الاصطناعي"""
     try:
         if uploaded_file.type == "application/pdf":
-            # استخراج النص من PDF إن أمكن أو معالجته كصورة
             reader = pypdf.PdfReader(uploaded_file)
-            text = ""
+            text_content = ""
             for page in reader.pages:
-                text += page.extract_text() or ""
-            return text
+                text_content += page.extract_text() or ""
+            
+            if text_content.strip():
+                return text_content
+            else:
+                return "الملف PDF عبارة عن صورة، يرجى التدقيق في الصورة واستخراج الرقم الضريبي ورقم الفاتورة والمبالغ."
         else:
             return Image.open(uploaded_file)
     except Exception:
         return None
 
 def extract_invoice_data(uploaded_file):
-    """استخراج رقم الفاتورة والرقم الضريبي والمبالغ والمورد من الفاتورة"""
+    """استخراج رقم الفاتورة والرقم الضريبي والمبالغ بدقة من الفاتورة"""
     if not API_KEY:
         return {}
     try:
         genai.configure(api_key=API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        content_input = process_file_to_image(uploaded_file)
-        if not content_input:
+        file_input = process_uploaded_file(uploaded_file)
+        if not file_input:
             return {}
             
         prompt = """
-        اقرأ هذه الفاتورة بدقة واستخرج البيانات التالية بصيغة JSON فقط:
+        أنت محاسب خبير. قم بفحص هذه الفاتورة المرفقة بدقة عالية واستخرج البيانات التالية:
+        1. رقم الفاتورة (Invoice Number / Serial No)
+        2. الرقم الضريبي للمورد (Tax Identification Number / VAT Number)
+        3. اسم المورد (Supplier / Merchant Name)
+        4. المبلغ قبل الضريبة (Amount excluding VAT)
+        5. مبلغ الضريبة (VAT Amount)
+
+        قم بإرجاع النتيجة بصيغة JSON حصرية فقط بدون أي كلام إضافي:
         {
             "inv_no": "رقم الفاتورة",
+            "tax_no": "الرقم الضريبي",
             "supplier": "اسم المورد",
-            "tax_no": "الرقم الضريبي للمورد",
-            "amount": "المبلغ الخاضع للضريبة كعدد",
-            "tax_amount": "مبلغ الضريبة كعدد"
+            "amount": 0.0,
+            "tax_amount": 0.0
         }
-        تأكد من استخراج رقم الفاتورة والرقم الضريبي بدقة وبدون أخطاء. لا تضف أي نص خارج JSON.
         """
         
-        response = model.generate_content([content_input, prompt])
+        response = model.generate_content([file_input, prompt])
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean_json)
     except Exception:
@@ -78,6 +87,10 @@ if uploaded_files:
         uploaded_files = uploaded_files[:5]
         
     st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
+    
+    if not API_KEY:
+        st.error("⚠️ مفتاح GEMINI_API_KEY غير معرف في إعدادات Secrets! لن يتم استخراج البيانات تلقائياً حتى يتم إضافته.")
+        
     st.divider()
     
     st.subheader("2️⃣ مراجعة وتحديد البيانات")
@@ -112,8 +125,10 @@ if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
         
-        with st.spinner(f"🔍 جاري قراءة بيانات الفاتورة {idx + 1}..."):
-            ext_data = extract_invoice_data(file)
+        ext_data = {}
+        if API_KEY:
+            with st.spinner(f"🔍 جاري قراءة واستخراج الرقم الضريبي ورقم الفاتورة {idx + 1}..."):
+                ext_data = extract_invoice_data(file)
             
         col1, col2 = st.columns(2)
         with col1:
