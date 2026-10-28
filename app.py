@@ -2,8 +2,9 @@ import streamlit as st
 import openpyxl
 from datetime import datetime
 import os
-import re
-import pdfplumber
+import json
+import tempfile
+import google.generativeai as genai
 
 st.set_page_config(
     page_title="أداة تفريغ العهود - 2026",
@@ -16,15 +17,6 @@ st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة
 st.divider()
 
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
-
-def convert_arabic_digits(text):
-    """تحويل كافة الأرقام العربية الشرقية (٠١٢٣٤٥٦٧٨٩) إلى أرقام إنجليزية (0123456789)"""
-    if not text:
-        return ""
-    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
-    english_digits = "0123456789"
-    translation_table = str.maketrans(arabic_digits, english_digits)
-    return str(text).translate(translation_table)
 
 def tafqeet_arabic(amount):
     """تحويل المبلغ تلقائياً إلى كلمات عربية (تفقيط)"""
@@ -48,106 +40,57 @@ def get_arabic_month(month_num):
     }
     return months.get(month_num, "")
 
-def parse_pdf_invoice_perfect(uploaded_file):
-    """استخراج دقيق ومستقل لجميع بيانات فواتير الكهرباء بدون أي نسبة خطأ"""
-    data = {
-        "inv_no": "",
-        "account_no": "",
-        "inv_date": "",
-        "amount": 0.0,
-        "tax_no": "300000361310003",
-        "supplier": "الشركة السعودية للكهرباء"
-    }
+def extract_invoice_with_ai(uploaded_file):
+    """استخراج ذكي وشامل لجميع أنواع واختلافات الفواتير عبر Gemini AI"""
+    if not API_KEY:
+        return {}
     try:
-        uploaded_file.seek(0)
-        full_text_raw = ""
-        words_list = []
+        genai.configure(api_key=API_KEY)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ""
-                full_text_raw += text + "\n"
-                # استخراج الكلمات لمطابقة التخطيط بدون الاعتماد على الرموز
-                p_words = page.extract_words() or []
-                for w in p_words:
-                    words_list.append(convert_arabic_digits(w['text']))
+        # حفظ الملف مؤقتاً لرفعه للتحليل البصري الشامل
+        suffix = ".pdf" if uploaded_file.type == "application/pdf" else ".png"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            uploaded_file.seek(0)
+            tmp_file.write(uploaded_file.read())
+            tmp_path = tmp_file.name
 
-        full_text = convert_arabic_digits(full_text_raw)
+        sample_file = genai.upload_file(path=tmp_path)
         
-        # 1. استخراج رقم الفاتورة (يتكون من 12 رقم يبدأ بـ 20 أو 25)
-        inv_match = (
-            re.search(r'رقم\s*الفاتورة[^\d]*(\d{12})', full_text) or
-            re.search(r'\b(20\d{10})\b', full_text) or
-            re.search(r'\b(25\d{10})\b', full_text)
-        )
-        if inv_match:
-            data["inv_no"] = inv_match.group(1)
-        else:
-            # طريقة مسح الكلمات المستخرجة تباعاً
-            for idx, w in enumerate(words_list):
-                if "الفاتورة" in w and idx + 1 < len(words_list):
-                    possible_num = re.sub(r'\D', '', words_list[idx + 1])
-                    if len(possible_num) == 12:
-                        data["inv_no"] = possible_num
-                        break
+        prompt = """
+        أنت محاسب قانوني تدقق في فواتير الكهرباء والخدمات السعودية. قم بفحص المستند المرفق بدقة متناهية واستخرج البيانات التالية بالظبط:
 
-        # 2. استخراج رقم الحساب (11 رقم تبدأ بـ 301 أو 30)
-        acc_match = (
-            re.search(r'رقم\s*الحساب[^\d]*(\d{11})', full_text) or
-            re.search(r'\b(301\d{8})\b', full_text) or
-            re.search(r'\b(30\d{9})\b', full_text)
-        )
-        if acc_match:
-            data["account_no"] = acc_match.group(1)
+        1. inv_no: رقم الفاتورة (Invoice Number) المكون غالباً من 12 رقم يبدأ بـ 20 أو 25 (مثال: 208026326251 أو 252003458719).
+        2. account_no: رقم الحساب / رقم المشترك (Account Number) المكون من 11 رقم يبدأ بـ 30 (مثال: 30136196833 أو 30105906941).
+        3. inv_date: تاريخ بداية الاستحقاق أو تاريخ الفاتورة المكتوب في ملخص الفاتورة بصيغة YYYY-MM-DD (احذر: لا تأخذ تاريخ بداية الفترة أو نهاية الفترة، بل تاريخ بداية الاستحقاق أو تاريخ الفاتورة مثل: 2026-10-11 أو 2026-10-17).
+        4. amount: المبلغ الخاضع للضريبة / إجمالي المبلغ غير شامل ضريبة القيمة المضافة (أرقام فقط كعدد عشري مثل: 1821.40 أو 407.42).
+        5. tax_no: الرقم الضريبي للمورد (غالباً: 300000361310003).
+        6. supplier: اسم المورد (الشركة السعودية للكهرباء).
 
-        # 3. استخراج تاريخ الفاتورة / بداية الاستحقاق (استبعاد تاريخ بداية الفترة)
-        date_matches = (
-            re.findall(r'تاريخ\s*بداية\s*الاستحقاق[^\d]*(\d{2}[-/]\d{2}[-/]\d{4})', full_text) or
-            re.findall(r'تاريخ\s*الفاتورة[^\d]*(\d{2}[-/]\d{2}[-/]\d{4})', full_text) or
-            re.findall(r'(\d{2}-\d{2}-\d{4})', full_text)
-        )
-        if date_matches:
-            target_date = date_matches[0]
-            d_str = target_date.replace('/', '-')
-            parts = d_str.split('-')
-            if len(parts[0]) == 4:
-                data["inv_date"] = d_str
-            else:
-                data["inv_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
-
-        # 4. استخراج الرقم الضريبي للمورد
-        tax_match = re.search(r'(3\d{14})', full_text)
-        if tax_match:
-            data["tax_no"] = tax_match.group(1)
-
-        # 5. استخراج المبلغ بدون الضريبة (المبلغ الخاضع للضريبة)
-        amt_match = (
-            re.search(r'غير\s*شامل[^\d]*([\d\.,]+)', full_text) or
-            re.search(r'المبلغ\s*الخاضع\s*للضريبة[^\d]*([\d\.,]+)', full_text) or
-            re.search(r'إجمالي\s*المبلغ[^\d]*([\d\.,]+)', full_text)
-        )
+        ضع النتائج في كائن JSON حصراً بدون أي كلام إضافي:
+        {
+            "inv_no": "رقم الفاتورة",
+            "account_no": "رقم الحساب",
+            "inv_date": "YYYY-MM-DD",
+            "amount": 0.00,
+            "tax_no": "الرقم الضريبي",
+            "supplier": "اسم الشركة"
+        }
+        """
         
-        if amt_match:
-            raw_str = amt_match.group(1).replace(',', '').strip()
-            try:
-                data["amount"] = float(raw_str)
-            except Exception:
-                pass
-
-        # إذا لم يُلتقط المبلغ، يتم استخراجه من المبالغ المذكورة بحساب الفرق أو قراءة جدول الإجمالي
-        if data["amount"] == 0.0:
-            all_floats = re.findall(r'(\d{1,4}\.\d{2})', full_text)
-            possible_amts = []
-            for f in all_floats:
-                v = float(f)
-                if 10.0 <= v <= 20000.0 and v not in [2094.61, 1765.0, 2180.13, 273.21]:
-                    possible_amts.append(v)
-            if possible_amts:
-                data["amount"] = possible_amts[0]
-
+        response = model.generate_content([sample_file, prompt])
+        
+        # تنظيف الملف المؤقت
+        os.remove(tmp_path)
+        try:
+            genai.delete_file(sample_file.name)
+        except Exception:
+            pass
+            
+        clean_json = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_json)
     except Exception:
-        pass
-    return data
+        return {}
 
 st.subheader("1️⃣ رفع الفواتير (حتى 5 فواتير)")
 uploaded_files = st.file_uploader(
@@ -162,6 +105,10 @@ if uploaded_files:
         uploaded_files = uploaded_files[:5]
         
     st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
+    
+    if not API_KEY:
+        st.error("⚠️ مفتاح GEMINI_API_KEY غير مفعّل في Secrets.")
+        
     st.divider()
     
     st.subheader("2️⃣ مراجعة وتحديد البيانات")
@@ -196,8 +143,10 @@ if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
         
-        with st.spinner(f"🔍 جاري استخراج البيانات بدقة عالية للفاتورة #{idx + 1}..."):
-            ext_data = parse_pdf_invoice_perfect(file)
+        ext_data = {}
+        if API_KEY:
+            with st.spinner(f"🔍 جاري فحص وقراءة بيانات الفاتورة #{idx + 1} بالذكاء الاصطناعي..."):
+                ext_data = extract_invoice_with_ai(file)
             
         col1, col2 = st.columns(2)
         with col1:
@@ -297,9 +246,4 @@ if uploaded_files:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                 
-                st.link_button("🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف", "https://fanar.gqb.org.sa/requests/home")
-                
-            except Exception as e:
-                st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
-        else:
-            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
+                st.link_button("🌐 الذهاب إلى
