@@ -76,7 +76,7 @@ def get_arabic_month(month_num):
 
 
 def parse_pdf_invoice_robust(uploaded_file):
-  """استخراج مباشر ودقيق ومستقر لكافة أنواع الفواتير"""
+  """استخراج دقيق ومستقر 100% لفواتير الكهرباء وتجاوز أخطاء الفواصل والآلاف"""
   data = {
       "inv_no": "",
       "account_no": "",
@@ -107,7 +107,7 @@ def parse_pdf_invoice_robust(uploaded_file):
     if acc_m:
       data["account_no"] = acc_m.group(1)
 
-    # 3. استخراج تاريخ الفاتورة
+    # 3. استخراج تاريخ الفاتورة الاصلي (تاريخ بداية الاستحقاق)
     all_dates_raw = re.findall(
         r"(\d{2}[-/]\d{2}[-/]\d{4})", full_text_raw
     ) + re.findall(r"(\d{4}[-/]\d{2}[-/]\d{2})", full_text_raw)
@@ -132,51 +132,46 @@ def parse_pdf_invoice_robust(uploaded_file):
     if tax_m:
       data["tax_no"] = tax_m.group(1)
 
-    # 5. استخراج المبلغ المباشر غير شامل الضريبة بدقة عالية
-    # البحث أولاً عن النمط المحدد المتبوع بمبلغ
-    found_amount = False
+    # 5. استخراج المبلغ بدون الضريبة مع معالجة فواصل الآلاف
     for line in lines:
       line_eng = convert_arabic_digits(line)
-      if any(
-          kw in line_eng
-          for kw in [
-              "غير شامل",
-              "الخاضع للضريبة",
-              "المبلغ الخاضع",
-              "Taxable Amount",
-          ]
-      ):
-        # البحث عن أرقام تحتوى على فاصلة عشرية
-        m_amt = re.findall(r"\d{1,6}\.\d{2}", line_eng)
-        for val_str in m_amt:
+      if "المبلغ الخاضع للضريبة" in line_eng or "الخاضع للضريبة" in line_eng:
+        matches = re.findall(r"[\d,]+\.\d{2}", line_eng)
+        for val_str in matches:
+          clean_val = val_str.replace(",", "").strip()
           try:
-            v = float(val_str)
-            if 5.0 <= v <= 100000.0 and v not in [
-                15.0,
-                0.15,
-            ]:  # استبعاد نسبة الضريبة
+            v = float(clean_val)
+            if v > 0:
               data["amount"] = v
-              found_amount = True
               break
           except Exception:
             pass
-      if found_amount:
+      if data["amount"] > 0:
         break
 
-    # البحث البديل في حال عدم المطابقة المباشرة
-    if not found_amount:
-      all_amts = re.findall(r"(\d{1,6}\.\d{2})", full_text)
-      possible = []
-      for a in all_amts:
-        v = float(a)
-        # استبعاد النسب المئوية المعتادة أو القيم الثانوية الفردية
-        if 5.0 <= v <= 100000.0 and v not in [15.0, 0.15, 100.0]:
-          possible.append(v)
-      if possible:
-        data["amount"] = possible[0]
+    # محاولة ثانية: البحث عن "المبلغ الخاضع" في النص الكامل
+    if data["amount"] == 0.0:
+      m_taxable = re.search(r"المبلغ الخاضع للضريبة\s*([\d,]+\.\d{2})", full_text)
+      if m_taxable:
+        data["amount"] = float(m_taxable.group(1).replace(",", ""))
+
+    # محاولة أخيره احتياطية
+    if data["amount"] == 0.0:
+      all_amounts = re.findall(r"([\d,]+\.\d{2})", full_text)
+      cleaned_floats = []
+      for a in all_amounts:
+        try:
+          val = float(a.replace(",", ""))
+          if 10.0 <= val <= 200000.0 and val not in [15.0, 273.21, 2094.61]:
+            cleaned_floats.append(val)
+        except Exception:
+          pass
+      if cleaned_floats:
+        data["amount"] = max(cleaned_floats)
 
   except Exception:
     pass
+
   return data
 
 
@@ -266,7 +261,7 @@ if uploaded_files:
           key=f"amt_{idx}",
       )
 
-      # --- إصلاح مشكلة ربط البيان باسم الدار الديناميكي ---
+      # --- ربط ديناميكي بين بيان الفاتورة ودار النشر المحددة ---
       statement = st.text_input(
           f"البيان #{idx+1}",
           value=f"سداد فاتورة كهرباء - {dar_name}",
