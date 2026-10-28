@@ -6,7 +6,6 @@ import json
 from PIL import Image
 import google.generativeai as genai
 import pypdf
-import io
 
 st.set_page_config(
     page_title="أداة تفريغ العهود - 2026",
@@ -21,76 +20,58 @@ st.divider()
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
 def tafqeet_arabic(amount):
-    """دالة بسيطة لتحويل المبلغ إلى نص عربي (تفقيط)"""
+    """تحويل المبلغ التلقائي إلى كلمات عربية (تفقيط)"""
     try:
         if amount <= 0:
             return ""
-        
-        units = ["", "واحد", "اثنان", "ثلاثة", "أربعة", "خمسة", "ستة", "سبعة", "ثمانية", "تسعة", "عشرة"]
-        
         riyal = int(amount)
         halalas = int(round((amount - riyal) * 100))
-        
         text = f"{riyal} ريال سعودي"
         if halalas > 0:
             text += f" و {halalas} هللة"
-        text += " فقط لا غير"
-        return text
+        return text + " فقط لا غير"
     except Exception:
         return ""
 
 def extract_invoice_data(uploaded_file):
-    """استخراج بيانات الفاتورة بدقة عالية من الصور والـ PDF"""
+    """استخراج بيانات الفاتورة المرفوعة"""
     if not API_KEY:
         return {}
     try:
         genai.configure(api_key=API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        inputs = []
+        # تجهيز أجزاء الملف لقراءتها
+        uploaded_file.seek(0)
+        bytes_data = uploaded_file.read()
         
-        if uploaded_file.type == "application/pdf":
-            # قراءة PDF كنص أو استخراج الصور منه
-            reader = pypdf.PdfReader(uploaded_file)
-            pdf_text = ""
-            for page in reader.pages:
-                pdf_text += page.extract_text() or ""
-            
-            if len(pdf_text.strip()) > 20:
-                inputs.append(f"محتوى ملف الـ PDF النصي:\n{pdf_text}")
-            else:
-                # إذا كان PDF مصور، نأخذ أول صفحة كصورة
-                for page in reader.pages:
-                    for img_obj in page.images:
-                        img_bytes = img_obj.data
-                        inputs.append(Image.open(io.BytesIO(img_bytes)))
-                        break
-                    if inputs:
-                        break
-        else:
-            inputs.append(Image.open(uploaded_file))
-            
-        if not inputs:
-            return {}
-            
         prompt = """
-        أنت محاسب تدقق في الفواتير السعودية. قم بفحص المرفق بدقة واستخرج البيانات التالية بصيغة JSON حصرية فقط:
+        أنت محاسب متخصص. فحص الفاتورة المرفقة واستخرج البيانات التالية بدقة ودون تحريف:
+        1. رقم الفاتورة (Invoice Number / Serial Number)
+        2. الرقم الضريبي للمورد (VAT / Tax Registration Number - تتكون من 15 رقم في السعودية تبدأ وتنتهي برقم 3)
+        3. اسم المورد / الشركة (Supplier Name)
+        4. المبلغ الخاضع للضريبة (Taxable Amount)
+        5. مبلغ ضريبة القيمة المضافة (VAT Amount)
+
+        أرجع النتيجة فقط بصيغة JSON حصرية بأسماء المفاتيح التالية:
         {
-            "inv_no": "رقم الفاتورة بالضبط",
-            "tax_no": "الرقم الضريبي للمورد (غالباً 15 رقم يبدأ بـ 3)",
-            "supplier": "اسم الشركة أو المورد",
+            "inv_no": "رقم الفاتورة",
+            "tax_no": "الرقم الضريبي",
+            "supplier": "اسم المورد",
             "amount": 0.00,
             "tax_amount": 0.00
         }
-        
-        شروط مهمة:
-        - استخرج رقم الفاتورة بدون حذف أي أرقام منه.
-        - الرقم الضريبي يبدأ بـ 3 وينتهي بـ 3 ويتكون من 15 رقم.
-        - لا تضف أي نص خارج JSON.
         """
-        inputs.append(prompt)
         
-        response = model.generate_content(inputs)
+        if uploaded_file.type == "application/pdf":
+            file_part = {
+                "mime_type": "application/pdf",
+                "data": bytes_data
+            }
+        else:
+            file_part = Image.open(uploaded_file)
+            
+        response = model.generate_content([file_part, prompt])
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean_json)
     except Exception as e:
@@ -111,7 +92,7 @@ if uploaded_files:
     st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
     
     if not API_KEY:
-        st.error("⚠️ مفتاح GEMINI_API_KEY غير معرف في إعدادات Secrets!")
+        st.error("⚠️ مفتاح GEMINI_API_KEY غير معرف في Secrets.")
         
     st.divider()
     
@@ -172,7 +153,7 @@ if uploaded_files:
                 "أخرى"
             ], key=f"cat_{idx}")
             
-            # حساب الإجمالي وتحويله إلى كلمات (تفقيط) تلقائياً
+            # تفقيط المبلغ تلقائياً
             total_amt = amount + tax_amount
             written_amount = tafqeet_arabic(total_amt)
             written_text = st.text_input(f"المبلغ كتابةً (تفقيط) #{idx+1}", value=written_amount, key=f"writ_{idx}")
@@ -242,4 +223,4 @@ if uploaded_files:
             except Exception as e:
                 st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
         else:
-            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
+            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع، يُرجى تعديل اسم الملف في GitHub وإزالة النقطة الزائدة.")
