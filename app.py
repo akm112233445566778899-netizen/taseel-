@@ -3,7 +3,7 @@ import openpyxl
 from datetime import datetime
 import os
 import json
-from PIL import Image
+import tempfile
 import google.generativeai as genai
 
 st.set_page_config(
@@ -19,7 +19,7 @@ st.divider()
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
 def tafqeet_arabic(amount):
-    """تحويل المبلغ إلى كلمات عربية (تفقيط)"""
+    """تحويل المبلغ التلقائي إلى كلمات عربية (تفقيط)"""
     try:
         if amount <= 0:
             return ""
@@ -41,46 +41,39 @@ def get_arabic_month(month_num):
     return months.get(month_num, "")
 
 def extract_invoice_data(uploaded_file):
-    """استخراج أرقام الفواتير والأرقام الضريبية والمبالغ بدقة عالية"""
+    """استخراج رقم الفاتورة ورقم الحساب وتاريخ الفاتورة والمبلغ بدقة"""
     if not API_KEY:
         return {}
     try:
         genai.configure(api_key=API_KEY)
-        # استخدام النموذج المحدث
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        uploaded_file.seek(0)
-        file_bytes = uploaded_file.read()
+        suffix = ".pdf" if uploaded_file.type == "application/pdf" else ".png"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            uploaded_file.seek(0)
+            tmp_file.write(uploaded_file.read())
+            tmp_path = tmp_file.name
+
+        sample_file = genai.upload_file(path=tmp_path)
         
         prompt = """
-        أنت دقيق جداً في مراجعة الفواتير السعودية. قم بقراءة مستند الفاتورة المرفق واستخرج البيانات التالية بدقة متناهية:
-        1. inv_no: رقم الفاتورة المكتوب في الفاتورة (Invoice Number / Serial Number).
-        2. tax_no: الرقم الضريبي للمورد (Tax/VAT Registration Number) والمكون غالباً من 15 رقم يبدأ وينتهي برقم 3.
-        3. supplier: اسم المورد أو الشركة.
-        4. inv_date: تاريخ الفاتورة بالضبط بصيغة YYYY-MM-DD.
-        5. amount: المبلغ قبل الضريبة (أرقام فقط).
-        6. tax_amount: مبلغ الضريبة (أرقام فقط).
-
-        قم بإرجاع النتيجة فقط بصيغة JSON حصرية بدون أي كلام خارجي:
+        أنت محاسب متخصص بفرز الفواتير. اقرأ الفاتورة المرفقة واستخرج البيانات التالية بدقة بصيغة JSON حصرية فقط:
         {
-            "inv_no": "رقم الفاتورة",
-            "tax_no": "الرقم الضريبي",
-            "supplier": "اسم المورد",
-            "inv_date": "تاريخ الفاتورة",
-            "amount": 0.00,
-            "tax_amount": 0.00
+            "inv_no": "رقم الفاتورة بالضبط",
+            "account_no": "رقم الحساب / رقم الاشتراك / رقم الخدمة إن وجد",
+            "supplier": "اسم المورد أو الشركة",
+            "tax_no": "الرقم الضريبي للمورد (15 رقم)",
+            "inv_date": "تاريخ الفاتورة بصيغة YYYY-MM-DD",
+            "amount": 0.00
         }
+        ملاحظة: استخرج المبلغ الخاضع للضريبة (قبل الضريبة) فقط كعدد.
         """
         
-        if uploaded_file.type == "application/pdf":
-            content_part = {
-                "mime_type": "application/pdf",
-                "data": file_bytes
-            }
-        else:
-            content_part = Image.open(uploaded_file)
-            
-        response = model.generate_content([content_part, prompt])
+        response = model.generate_content([sample_file, prompt])
+        
+        os.remove(tmp_path)
+        genai.delete_file(sample_file.name)
+        
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean_json)
     except Exception as e:
@@ -88,7 +81,7 @@ def extract_invoice_data(uploaded_file):
 
 st.subheader("1️⃣ رفع الفواتير (حتى 5 فواتير)")
 uploaded_files = st.file_uploader(
-    "التقط صور الفواتير أو اسحب ملفات الـ PDF هنا (يمكنك تحديد حتى 5 فواتير معاً)", 
+    "التقط صور الفواتير أو اسحب ملفات الـ PDF هنا (حتى 5 فواتير معاً)", 
     type=["pdf", "png", "jpg", "jpeg"],
     accept_multiple_files=True
 )
@@ -101,7 +94,7 @@ if uploaded_files:
     st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
     
     if not API_KEY:
-        st.error("⚠️ مفتاح GEMINI_API_KEY غير موجود في إعدادات Secrets!")
+        st.error("⚠️ مفتاح GEMINI_API_KEY غير مفعّل في Secrets.")
         
     st.divider()
     
@@ -139,20 +132,20 @@ if uploaded_files:
         
         ext_data = {}
         if API_KEY:
-            with st.spinner(f"🔍 جاري استخراج رقم الفاتورة والفيشة الضريبية والمبالغ #{idx + 1}..."):
+            with st.spinner(f"🔍 جاري استخراج البيانات تلقائياً للمستند #{idx + 1}..."):
                 ext_data = extract_invoice_data(file)
             
         col1, col2 = st.columns(2)
         with col1:
-            supplier = st.text_input(f"اسم المورد #{idx+1}", value=ext_data.get("supplier", "شركة الكهرباء السعودية"), key=f"sup_{idx}")
+            supplier = st.text_input(f"اسم المورد #{idx+1}", value=ext_data.get("supplier", "الشركة السعودية للكهرباء"), key=f"sup_{idx}")
             inv_no = st.text_input(f"رقم الفاتورة #{idx+1}", value=str(ext_data.get("inv_no", "")), key=f"inv_{idx}")
+            account_no = st.text_input(f"رقم الحساب #{idx+1}", value=str(ext_data.get("account_no", "")), key=f"acc_{idx}")
             today_str = datetime.today().strftime('%Y-%m-%d')
             inv_date = st.text_input(f"تاريخ الفاتورة #{idx+1}", value=str(ext_data.get("inv_date", today_str)), key=f"date_{idx}")
-            amount = st.number_input(f"المبلغ بدون الضريبة #{idx+1}", value=float(ext_data.get("amount", 0.0) or 0.0), step=0.01, key=f"amt_{idx}")
-            tax_amount = st.number_input(f"مبلغ الضريبة #{idx+1}", value=float(ext_data.get("tax_amount", 0.0) or 0.0), step=0.01, key=f"tax_amt_{idx}")
             
         with col2:
-            tax_no = st.text_input(f"الرقم الضريبي #{idx+1}", value=str(ext_data.get("tax_no", "")), key=f"tax_{idx}")
+            tax_no = st.text_input(f"الرقم الضريبي #{idx+1}", value=str(ext_data.get("tax_no", "300000361310003")), key=f"tax_{idx}")
+            amount = st.number_input(f"المبلغ بدون الضريبة #{idx+1}", value=float(ext_data.get("amount", 0.0) or 0.0), step=0.01, key=f"amt_{idx}")
             statement = st.text_input(f"البيان #{idx+1}", value=f"سداد فاتورة - {dar_name}", key=f"st_{idx}")
             category = st.selectbox(f"بند الحساب #{idx+1}", [
                 "الكهرباء", 
@@ -164,16 +157,17 @@ if uploaded_files:
                 "أخرى"
             ], key=f"cat_{idx}")
             
-            total_amt = amount + tax_amount
-            written_amount = tafqeet_arabic(total_amt)
+            # حساب التكلفة الكلية التقديرية شاملة الضريبة لتفقيط المبلغ
+            estimated_total = amount * 1.15
+            written_amount = tafqeet_arabic(estimated_total)
             written_text = st.text_input(f"المبلغ كتابةً (تفقيط) #{idx+1}", value=written_amount, key=f"writ_{idx}")
 
         invoices_data.append({
             "supplier": supplier,
             "inv_no": inv_no,
+            "account_no": account_no,
             "inv_date": inv_date,
             "amount": amount,
-            "tax_amount": tax_amount,
             "tax_no": tax_no,
             "statement": statement,
             "category": category,
@@ -184,14 +178,15 @@ if uploaded_files:
     st.subheader("3️⃣ المعالجة والإرسال")
     
     if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx"
+        # تأكد أن اسم ملف Excel الجديد مطاطب تماماً في GitHub
+        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
         
         if os.path.exists(excel_path):
             try:
                 wb = openpyxl.load_workbook(excel_path)
                 ws = wb.active
                 
-                # استخراج شهر وسنة الفاتورة لتحديث الخلية A2
+                # تحديث عنوان الخلية A2 بشهر الفاتورة واسم الدار
                 first_inv_date_str = invoices_data[0]["inv_date"]
                 try:
                     parsed_date = datetime.strptime(first_inv_date_str, '%Y-%m-%d')
@@ -201,38 +196,40 @@ if uploaded_files:
                 inv_month_name = get_arabic_month(parsed_date.month)
                 inv_year = parsed_date.year
                 
-                # تحديث عنوان الخلية A2
                 ws['A2'] = f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
                 
-                start_row = 5
+                start_row = 6  # الصف الأول المتاح لإدخال البيانات
                 
+                # خريطة الأعمدة للنموذج الجديد
                 cat_col_map = {
-                    "الكهرباء": "H",
-                    "المياة": "I",
-                    "الهاتف والبريد": "J",
-                    "الصيانة": "M",
-                    "قرطاسيات ومطبوعات": "N",
-                    "نظافة": "P",
-                    "أخرى": "U"
+                    "الهاتف والبريد": "I",
+                    "الكهرباء": "J",
+                    "المياة": "K",
+                    "الصيانة": "O",
+                    "قرطاسيات ومطبوعات": "P",
+                    "نظافة": "R",
+                    "أخرى": "W"
                 }
                 
                 for idx, item in enumerate(invoices_data):
                     current_row = start_row + idx
                     
-                    ws[f'C{current_row}'] = item["statement"]
-                    ws[f'D{current_row}'] = int(item["inv_no"]) if str(item["inv_no"]).isdigit() else item["inv_no"]
-                    ws[f'E{current_row}'] = item["inv_date"]
-                    ws[f'F{current_row}'] = item["tax_no"]
-                    ws[f'G{current_row}'] = item["supplier"]
+                    ws[f'C{current_row}'] = item["statement"]      # البيان
+                    ws[f'D{current_row}'] = item["account_no"]     # رقم الحساب
+                    ws[f'E{current_row}'] = int(item["inv_no"]) if str(item["inv_no"]).isdigit() else item["inv_no"] # رقم الفاتورة
+                    ws[f'F{current_row}'] = item["inv_date"]       # تاريخ الفاتورة
+                    ws[f'G{current_row}'] = item["tax_no"]         # الرقم الضريبي
+                    ws[f'G{current_row}'].number_format = '@'     # تنسيق كـ نص حتى لا تُمحى الأصفار
+                    ws[f'H{current_row}'] = item["supplier"]       # اسم المورد
                     
-                    col_letter = cat_col_map.get(item["category"], "H")
+                    # وضع المبلغ بدون ضريبة في عمود البند المناسب لحساب الضريبة تلقائياً بالمعادلات
+                    col_letter = cat_col_map.get(item["category"], "J")
                     ws[f'{col_letter}{current_row}'] = item["amount"]
-                    ws[f'V{current_row}'] = item["tax_amount"]
                 
                 output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
                 wb.save(output_filename)
                 
-                st.success(f"🎉 تم التفريغ لـ ({dar_name}) لشهر ({inv_month_name} {inv_year}) بنجاح!")
+                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
                 
                 with open(output_filename, "rb") as file:
                     st.download_button(
@@ -247,4 +244,4 @@ if uploaded_files:
             except Exception as e:
                 st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
         else:
-            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
+            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع، يُرجى التأكد من رفعه بنفس الاسم.")
