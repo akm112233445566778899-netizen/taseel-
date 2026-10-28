@@ -101,7 +101,7 @@ def extract_invoice_date(full_text):
     found = set()
 
     # DD-MM-YYYY أو DD/MM/YYYY
-    for d, m, y in re.findall(r"\b(\d{2})[-/](\d{2})[-/](\d{4})\b", full_text):
+    for d, m, y in re.findall(r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", full_text):
         try:
             dt = datetime(int(y), int(m), int(d))
             if 2000 <= dt.year <= 2100:  # يستبعد التواريخ الهجرية
@@ -110,7 +110,7 @@ def extract_invoice_date(full_text):
             pass
 
     # YYYY-MM-DD أو YYYY/MM/DD
-    for y, m, d in re.findall(r"\b(\d{4})[-/](\d{2})[-/](\d{2})\b", full_text):
+    for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)", full_text):
         try:
             dt = datetime(int(y), int(m), int(d))
             if 2000 <= dt.year <= 2100:
@@ -136,7 +136,7 @@ def extract_net_amount(full_text):
     ويأخذ أكبر صافي يحقق الشرط (وهو إجمالي الفاتورة، مو بنود الجدول).
     كمية الاستهلاك (ك.و.س) ما تحقق المعادلة فتتجاهل تلقائياً.
     """
-    amt_re = r"\d{1,3}(?:,\d{3})*\.\d{2}"
+    amt_re = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)"
     nums = set()
     for x in re.findall(amt_re, full_text):
         try:
@@ -187,17 +187,17 @@ def parse_pdf_invoice_robust(uploaded_file):
         full_text = convert_arabic_digits(full_text_raw)
 
         # 1. رقم الفاتورة (12 رقم يبدأ بـ 20 أو 25)
-        m = re.search(r"\b(2[05]\d{10})\b", full_text)
+        m = re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", full_text)
         if m:
             data["inv_no"] = m.group(1)
 
         # 2. رقم الحساب (11 رقم يبدأ بـ 30)
-        m = re.search(r"\b(30\d{9})\b", full_text)
+        m = re.search(r"(?<!\d)(30\d{9})(?!\d)", full_text)
         if m:
             data["account_no"] = m.group(1)
 
         # 3. الرقم الضريبي للمورد (15 رقم يبدأ بـ 3000)
-        m = re.search(r"\b(3000\d{11})\b", full_text)
+        m = re.search(r"(?<!\d)(3000\d{11})(?!\d)", full_text)
         if m:
             data["tax_no"] = m.group(1)
 
