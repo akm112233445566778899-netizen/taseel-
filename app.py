@@ -98,6 +98,24 @@ def extract_invoice_date(full_text):
     فتاريخ الفاتورة هو ثاني أكبر تاريخ.
     يرجع نص بصيغة YYYY-MM-DD أو "" إذا ما لقى.
     """
+    # الطريقة الأولى (الأدق): تاريخ الفاتورة يكون في نفس سطر رقم الحساب،
+    # أما تاريخ الاستحقاق فيكون في سطر مستقل تحته، فلا يُؤخذ أبداً.
+    for line in full_text.split("\n"):
+        if re.search(r"(?<!\d)30\d{9}(?!\d)", line):
+            line_dates = []
+            for d, m, y in re.findall(
+                r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", line
+            ):
+                try:
+                    dt = datetime(int(y), int(m), int(d))
+                    if 2000 <= dt.year <= 2100:
+                        line_dates.append(dt)
+                except ValueError:
+                    pass
+            if len(line_dates) == 1:
+                return line_dates[0].strftime("%Y-%m-%d")
+
+    # الطريقة الاحتياطية: ثاني أكبر تاريخ في الفاتورة
     found = set()
 
     # DD-MM-YYYY أو DD/MM/YYYY
