@@ -57,13 +57,13 @@ def extract_invoice_with_ai(uploaded_file):
         sample_file = genai.upload_file(path=tmp_path)
         
         prompt = """
-        أنت محاسب قانوني تدقق في فواتير الكهرباء والخدمات السعودية. قم بفحص المستند المرفق بدقة متناهية واستخرج البيانات التالية بالظبط:
+        أنت محاسب قانوني تدقق في فواتير الكهرباء والخدمات السعودية. قم بفحص المستند المرفق بدقة متناهية واستخرج البيانات التالية بالتحديد:
 
-        1. inv_no: رقم الفاتورة (Invoice Number) المكون غالباً من 12 رقم يبدأ بـ 20 أو 25 (مثال: 208026326251 أو 252003458719).
+        1. inv_no: رقم الفاتورة (Invoice Number) المكون من 12 رقم يبدأ بـ 20 أو 25 (مثال: 208026326251 أو 252003458719).
         2. account_no: رقم الحساب / رقم المشترك (Account Number) المكون من 11 رقم يبدأ بـ 30 (مثال: 30136196833 أو 30105906941).
-        3. inv_date: تاريخ بداية الاستحقاق أو تاريخ الفاتورة المكتوب في ملخص الفاتورة بصيغة YYYY-MM-DD (احذر: لا تأخذ تاريخ بداية الفترة أو نهاية الفترة، بل تاريخ بداية الاستحقاق أو تاريخ الفاتورة مثل: 2026-10-11 أو 2026-10-17).
+        3. inv_date: تاريخ بداية الاستحقاق أو تاريخ الفاتورة المكتوب في ملخص الفاتورة بصيغة YYYY-MM-DD (مثال: 2026-10-11 أو 2026-10-17). احذر من أخذ تاريخ بداية الفترة أو نهاية الفترة.
         4. amount: المبلغ الخاضع للضريبة / إجمالي المبلغ غير شامل ضريبة القيمة المضافة (أرقام فقط كعدد عشري مثل: 1821.40 أو 407.42).
-        5. tax_no: الرقم الضريبي للمورد (غالباً: 300000361310003).
+        5. tax_no: الرقم الضريبي للمورد (300000361310003).
         6. supplier: اسم المورد (الشركة السعودية للكهرباء).
 
         ضع النتائج في كائن JSON حصراً بدون أي كلام إضافي:
@@ -72,8 +72,8 @@ def extract_invoice_with_ai(uploaded_file):
             "account_no": "رقم الحساب",
             "inv_date": "YYYY-MM-DD",
             "amount": 0.00,
-            "tax_no": "الرقم الضريبي",
-            "supplier": "اسم الشركة"
+            "tax_no": "300000361310003",
+            "supplier": "الشركة السعودية للكهرباء"
         }
         """
         
@@ -134,4 +134,92 @@ if uploaded_files:
         "دار الطرفية"
     ]
     
-    dar_name = st.selectbox("
+    dar_name = st.selectbox("اختر اسم الدار المعنية", dar_list)
+    
+    invoices_data = []
+    
+    for idx, file in enumerate(uploaded_files):
+        st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
+        
+        ext_data = {}
+        if API_KEY:
+            with st.spinner(f"🔍 جاري فحص وقراءة بيانات الفاتورة #{idx + 1} بالذكاء الاصطناعي..."):
+                ext_data = extract_invoice_with_ai(file)
+            
+        col1, col2 = st.columns(2)
+        with col1:
+            supplier = st.text_input(f"اسم المورد #{idx+1}", value=ext_data.get("supplier", "الشركة السعودية للكهرباء"), key=f"sup_{idx}")
+            inv_no = st.text_input(f"رقم الفاتورة #{idx+1}", value=str(ext_data.get("inv_no", "")), key=f"inv_{idx}")
+            account_no = st.text_input(f"رقم الحساب #{idx+1}", value=str(ext_data.get("account_no", "")), key=f"acc_{idx}")
+            inv_date = st.text_input(f"تاريخ الفاتورة #{idx+1}", value=str(ext_data.get("inv_date", "")), key=f"date_{idx}")
+            
+        with col2:
+            tax_no = st.text_input(f"الرقم الضريبي #{idx+1}", value=str(ext_data.get("tax_no", "300000361310003")), key=f"tax_{idx}")
+            amount = st.number_input(f"المبلغ بدون الضريبة #{idx+1}", value=float(ext_data.get("amount", 0.0) or 0.0), step=0.01, key=f"amt_{idx}")
+            statement = st.text_input(f"البيان #{idx+1}", value=f"سداد فاتورة كهرباء - {dar_name}", key=f"st_{idx}")
+            category = st.selectbox(f"بند الحساب #{idx+1}", [
+                "الكهرباء", 
+                "المياة", 
+                "الهاتف والبريد",
+                "الصيانة",
+                "قرطاسيات ومطبوعات",
+                "نظافة",
+                "أخرى"
+            ], key=f"cat_{idx}")
+            
+            estimated_total = amount * 1.15
+            written_amount = tafqeet_arabic(estimated_total)
+            written_text = st.text_input(f"المبلغ كتابةً (تفقيط) #{idx+1}", value=written_amount, key=f"writ_{idx}")
+
+        invoices_data.append({
+            "supplier": supplier,
+            "inv_no": inv_no,
+            "account_no": account_no,
+            "inv_date": inv_date,
+            "amount": amount,
+            "tax_no": tax_no,
+            "statement": statement,
+            "category": category,
+            "written_amount": written_text
+        })
+        st.markdown("---")
+
+    st.subheader("3️⃣ المعالجة والإرسال")
+    
+    if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
+        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
+        
+        if os.path.exists(excel_path):
+            try:
+                wb = openpyxl.load_workbook(excel_path)
+                ws = wb.active
+                
+                first_inv_date_str = invoices_data[0]["inv_date"]
+                try:
+                    parsed_date = datetime.strptime(first_inv_date_str, '%Y-%m-%d')
+                except Exception:
+                    parsed_date = datetime.today()
+                    
+                inv_month_name = get_arabic_month(parsed_date.month)
+                inv_year = parsed_date.year
+                
+                ws['A2'] = f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
+                
+                start_row = 6
+                
+                cat_col_map = {
+                    "الهاتف والبريد": "I",
+                    "الكهرباء": "J",
+                    "المياة": "K",
+                    "الصيانة": "O",
+                    "قرطاسيات ومطبوعات": "P",
+                    "نظافة": "R",
+                    "أخرى": "W"
+                }
+                
+                for idx, item in enumerate(invoices_data):
+                    current_row = start_row + idx
+                    
+                    ws[f'C{current_row}'] = item["statement"]
+                    ws[f'D{current_row}'] = item["account_no"]
+                    ws[f'E{current_row}'] = int(item["inv_no"]) if
