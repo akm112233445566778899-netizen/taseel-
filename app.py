@@ -6,6 +6,7 @@ import json
 from PIL import Image
 import google.generativeai as genai
 import pypdf
+import io
 
 st.set_page_config(
     page_title="أداة تفريغ العهود - 2026",
@@ -17,61 +18,82 @@ st.title("🏛️ أداة تفريغ العهود وإصدار أمر الصر�
 st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - نموذج الإدارة العامة 2026")
 st.divider()
 
-# جلب مفتاح API من Secrets
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-def process_uploaded_file(uploaded_file):
-    """معالجة الملف المرفوع سواء كان صورة أو PDF واستخراج محتواه للذكاء الاصطناعي"""
+def tafqeet_arabic(amount):
+    """دالة بسيطة لتحويل المبلغ إلى نص عربي (تفقيط)"""
     try:
-        if uploaded_file.type == "application/pdf":
-            reader = pypdf.PdfReader(uploaded_file)
-            text_content = ""
-            for page in reader.pages:
-                text_content += page.extract_text() or ""
-            
-            if text_content.strip():
-                return text_content
-            else:
-                return "الملف PDF عبارة عن صورة، يرجى التدقيق في الصورة واستخراج الرقم الضريبي ورقم الفاتورة والمبالغ."
-        else:
-            return Image.open(uploaded_file)
+        if amount <= 0:
+            return ""
+        
+        units = ["", "واحد", "اثنان", "ثلاثة", "أربعة", "خمسة", "ستة", "سبعة", "ثمانية", "تسعة", "عشرة"]
+        
+        riyal = int(amount)
+        halalas = int(round((amount - riyal) * 100))
+        
+        text = f"{riyal} ريال سعودي"
+        if halalas > 0:
+            text += f" و {halalas} هللة"
+        text += " فقط لا غير"
+        return text
     except Exception:
-        return None
+        return ""
 
 def extract_invoice_data(uploaded_file):
-    """استخراج رقم الفاتورة والرقم الضريبي والمبالغ بدقة من الفاتورة"""
+    """استخراج بيانات الفاتورة بدقة عالية من الصور والـ PDF"""
     if not API_KEY:
         return {}
     try:
         genai.configure(api_key=API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        file_input = process_uploaded_file(uploaded_file)
-        if not file_input:
+        inputs = []
+        
+        if uploaded_file.type == "application/pdf":
+            # قراءة PDF كنص أو استخراج الصور منه
+            reader = pypdf.PdfReader(uploaded_file)
+            pdf_text = ""
+            for page in reader.pages:
+                pdf_text += page.extract_text() or ""
+            
+            if len(pdf_text.strip()) > 20:
+                inputs.append(f"محتوى ملف الـ PDF النصي:\n{pdf_text}")
+            else:
+                # إذا كان PDF مصور، نأخذ أول صفحة كصورة
+                for page in reader.pages:
+                    for img_obj in page.images:
+                        img_bytes = img_obj.data
+                        inputs.append(Image.open(io.BytesIO(img_bytes)))
+                        break
+                    if inputs:
+                        break
+        else:
+            inputs.append(Image.open(uploaded_file))
+            
+        if not inputs:
             return {}
             
         prompt = """
-        أنت محاسب خبير. قم بفحص هذه الفاتورة المرفقة بدقة عالية واستخرج البيانات التالية:
-        1. رقم الفاتورة (Invoice Number / Serial No)
-        2. الرقم الضريبي للمورد (Tax Identification Number / VAT Number)
-        3. اسم المورد (Supplier / Merchant Name)
-        4. المبلغ قبل الضريبة (Amount excluding VAT)
-        5. مبلغ الضريبة (VAT Amount)
-
-        قم بإرجاع النتيجة بصيغة JSON حصرية فقط بدون أي كلام إضافي:
+        أنت محاسب تدقق في الفواتير السعودية. قم بفحص المرفق بدقة واستخرج البيانات التالية بصيغة JSON حصرية فقط:
         {
-            "inv_no": "رقم الفاتورة",
-            "tax_no": "الرقم الضريبي",
-            "supplier": "اسم المورد",
-            "amount": 0.0,
-            "tax_amount": 0.0
+            "inv_no": "رقم الفاتورة بالضبط",
+            "tax_no": "الرقم الضريبي للمورد (غالباً 15 رقم يبدأ بـ 3)",
+            "supplier": "اسم الشركة أو المورد",
+            "amount": 0.00,
+            "tax_amount": 0.00
         }
-        """
         
-        response = model.generate_content([file_input, prompt])
+        شروط مهمة:
+        - استخرج رقم الفاتورة بدون حذف أي أرقام منه.
+        - الرقم الضريبي يبدأ بـ 3 وينتهي بـ 3 ويتكون من 15 رقم.
+        - لا تضف أي نص خارج JSON.
+        """
+        inputs.append(prompt)
+        
+        response = model.generate_content(inputs)
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean_json)
-    except Exception:
+    except Exception as e:
         return {}
 
 st.subheader("1️⃣ رفع الفواتير (حتى 5 فواتير)")
@@ -89,7 +111,7 @@ if uploaded_files:
     st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
     
     if not API_KEY:
-        st.error("⚠️ مفتاح GEMINI_API_KEY غير معرف في إعدادات Secrets! لن يتم استخراج البيانات تلقائياً حتى يتم إضافته.")
+        st.error("⚠️ مفتاح GEMINI_API_KEY غير معرف في إعدادات Secrets!")
         
     st.divider()
     
@@ -127,18 +149,18 @@ if uploaded_files:
         
         ext_data = {}
         if API_KEY:
-            with st.spinner(f"🔍 جاري قراءة واستخراج الرقم الضريبي ورقم الفاتورة {idx + 1}..."):
+            with st.spinner(f"🔍 جاري قراءة واستخراج بيانات الفاتورة #{idx + 1}..."):
                 ext_data = extract_invoice_data(file)
             
         col1, col2 = st.columns(2)
         with col1:
             supplier = st.text_input(f"اسم المورد #{idx+1}", value=ext_data.get("supplier", "شركة الكهرباء السعودية"), key=f"sup_{idx}")
-            inv_no = st.text_input(f"رقم الفاتورة #{idx+1}", value=ext_data.get("inv_no", ""), key=f"inv_{idx}")
+            inv_no = st.text_input(f"رقم الفاتورة #{idx+1}", value=str(ext_data.get("inv_no", "")), key=f"inv_{idx}")
             amount = st.number_input(f"المبلغ بدون الضريبة #{idx+1}", value=float(ext_data.get("amount", 0.0) or 0.0), step=0.01, key=f"amt_{idx}")
             tax_amount = st.number_input(f"مبلغ الضريبة #{idx+1}", value=float(ext_data.get("tax_amount", 0.0) or 0.0), step=0.01, key=f"tax_amt_{idx}")
             
         with col2:
-            tax_no = st.text_input(f"الرقم الضريبي #{idx+1}", value=ext_data.get("tax_no", ""), key=f"tax_{idx}")
+            tax_no = st.text_input(f"الرقم الضريبي #{idx+1}", value=str(ext_data.get("tax_no", "")), key=f"tax_{idx}")
             statement = st.text_input(f"البيان #{idx+1}", value=f"سداد فاتورة - {dar_name}", key=f"st_{idx}")
             category = st.selectbox(f"بند الحساب #{idx+1}", [
                 "الكهرباء", 
@@ -150,6 +172,11 @@ if uploaded_files:
                 "أخرى"
             ], key=f"cat_{idx}")
             
+            # حساب الإجمالي وتحويله إلى كلمات (تفقيط) تلقائياً
+            total_amt = amount + tax_amount
+            written_amount = tafqeet_arabic(total_amt)
+            written_text = st.text_input(f"المبلغ كتابةً (تفقيط) #{idx+1}", value=written_amount, key=f"writ_{idx}")
+
         invoices_data.append({
             "supplier": supplier,
             "inv_no": inv_no,
@@ -157,7 +184,8 @@ if uploaded_files:
             "tax_amount": tax_amount,
             "tax_no": tax_no,
             "statement": statement,
-            "category": category
+            "category": category,
+            "written_amount": written_text
         })
         st.markdown("---")
 
@@ -199,7 +227,7 @@ if uploaded_files:
                 output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
                 wb.save(output_filename)
                 
-                st.success(f"🎉 تم تفريغ {len(invoices_data)} فاتورة لـ ({dar_name}) في ملف Excel بنجاح!")
+                st.success(f"🎉 تم تفريغ {len(invoices_data)} فاتورة لـ ({dar_name}) بنجاح!")
                 
                 with open(output_filename, "rb") as file:
                     st.download_button(
@@ -214,4 +242,4 @@ if uploaded_files:
             except Exception as e:
                 st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
         else:
-            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع، يُرجى التأكد من مطابقة اسم الملف.")
+            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
