@@ -49,7 +49,7 @@ def get_arabic_month(month_num):
     return months.get(month_num, "")
 
 def parse_pdf_invoice_dynamic(uploaded_file):
-    """استخراج ديناميكي مرن لرقم الفاتورة المتغير ورقم الحساب والتاريخ والمبلغ"""
+    """استخراج دقيق ومستقل لبيانات الفاتورة بدون تداخل بين أرقام الحساب والفاتورة والمبالغ"""
     data = {
         "inv_no": "",
         "account_no": "",
@@ -68,26 +68,18 @@ def parse_pdf_invoice_dynamic(uploaded_file):
         
         full_text = convert_arabic_digits(full_text_raw)
         
-        # 1. استخراج رقم الفاتورة الديناميكي المتغير
-        inv_match = (
-            re.search(r'رقم\s*الفاتورة\s*:\s*(\d+)', full_text) or
-            re.search(r'رقم\s*الفاتورة[^\d]*(\d{10,16})', full_text) or
-            re.search(r'الفاتورة\s*:\s*(\d{10,16})', full_text)
-        )
+        # 1. استخراج رقم الفاتورة (يبدأ بـ 252 أو يتكون من 12 رقم)
+        inv_match = re.search(r'رقم\s*الفاتورة\s*:\s*(\d{10,14})', full_text) or re.search(r'(25\d{10})', full_text)
         if inv_match:
             data["inv_no"] = inv_match.group(1)
             
-        # 2. استخراج رقم الحساب المتغير
-        acc_match = (
-            re.search(r'رقم\s*الحساب[^\d]*(\d{10,12})', full_text) or
-            re.search(r'الحساب[^\d]*(\d{10,12})', full_text) or
-            re.search(r'(\d{11})', full_text)
-        )
+        # 2. استخراج رقم الحساب (11 رقم تبدأ غالباً بـ 30)
+        acc_match = re.search(r'رقم\s*الحساب\s*(\d{11})', full_text) or re.search(r'(30\d{9})', full_text)
         if acc_match:
             data["account_no"] = acc_match.group(1)
             
-        # 3. استخراج تاريخ الفاتورة / بداية الاستحقاق
-        date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})', full_text) or re.search(r'(\d{2}[-/]\d{2}[-/]\d{4})', full_text)
+        # 3. استخراج تاريخ بداية الاستحقاق / تاريخ الفاتورة الأصلي
+        date_match = re.search(r'تاريخ\s*بداية\s*الاستحقاق\s*(\d{2}[-/]\d{2}[-/]\d{4})', full_text) or re.search(r'تاريخ\s*الفاتورة\s*(\d{2}[-/]\d{2}[-/]\d{4})', full_text)
         if date_match:
             d_str = date_match.group(1).replace('/', '-')
             parts = d_str.split('-')
@@ -95,14 +87,23 @@ def parse_pdf_invoice_dynamic(uploaded_file):
                 data["inv_date"] = d_str
             else:
                 data["inv_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
-                
-        # 4. استخراج الرقم الضريبي للمورد
-        tax_match = re.search(r'(3\d{14})', full_text)
+        else:
+            # تاريخ الاستحقاق العام بصيغة YYYY-MM-DD
+            all_dates = re.findall(r'(\d{4}-\d{2}-\d{2})', full_text)
+            if all_dates:
+                data["inv_date"] = all_dates[0]
+
+        # 4. استخراج الرقم الضريبي للمورد (15 رقم يبدأ وينتهي بـ 3)
+        tax_match = re.search(r'(3\d{13}3)', full_text)
         if tax_match:
             data["tax_no"] = tax_match.group(1)
 
-        # 5. استخراج المبلغ غير شامل الضريبة
-        amt_match = re.search(r'غير\s*شامل[^\d]*(\d+[\.,]\d{2})', full_text) or re.search(r'الخاضع\s*للضريبة[^\d]*(\d+[\.,]\d{2})', full_text)
+        # 5. استخراج المبلغ غير شامل الضريبة (المبلغ الخاضع للضريبة)
+        amt_match = (
+            re.search(r'المبلغ\s*الخاضع\s*للضريبة\s*(\d+[\.,]\d{2})', full_text) or
+            re.search(r'إجمالي\s*المبلغ\s*\(غير\s*شامل[^\)]*\)\s*(\d+[\.,]\d{2})', full_text) or
+            re.search(r'غير\s*شامل[^\d]*(\d+[\.,]\d{2})', full_text)
+        )
         if amt_match:
             raw_amt = amt_match.group(1).replace(',', '.')
             try:
@@ -110,14 +111,11 @@ def parse_pdf_invoice_dynamic(uploaded_file):
             except Exception:
                 pass
         else:
-            amounts = re.findall(r'(\d+\.\d{2})', full_text)
-            possible_amounts = []
-            for a in amounts:
-                val = float(a)
-                if 10.0 <= val <= 50000.0 and val not in [1765.0, 2180.13]:
-                    possible_amounts.append(val)
-            if possible_amounts:
-                data["amount"] = possible_amounts[0]
+            # التقاط قيمة الاستهلاك + خدمة العداد (مثال: 392.42 + 15.00 = 407.42)
+            cons_match = re.search(r'قيمة\s*الاستهلاك\s*:\s*(\d+\.\d{2})', full_text)
+            if cons_match:
+                cons_val = float(cons_match.group(1))
+                data["amount"] = round(cons_val + 15.00, 2)
 
     except Exception:
         pass
@@ -198,4 +196,82 @@ if uploaded_files:
             written_amount = tafqeet_arabic(estimated_total)
             written_text = st.text_input(f"المبلغ كتابةً (تفقيط) #{idx+1}", value=written_amount, key=f"writ_{idx}")
 
-        invoices_data
+        invoices_data.append({
+            "supplier": supplier,
+            "inv_no": inv_no,
+            "account_no": account_no,
+            "inv_date": inv_date,
+            "amount": amount,
+            "tax_no": tax_no,
+            "statement": statement,
+            "category": category,
+            "written_amount": written_text
+        })
+        st.markdown("---")
+
+    st.subheader("3️⃣ المعالجة والإرسال")
+    
+    if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
+        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
+        
+        if os.path.exists(excel_path):
+            try:
+                wb = openpyxl.load_workbook(excel_path)
+                ws = wb.active
+                
+                first_inv_date_str = invoices_data[0]["inv_date"]
+                try:
+                    parsed_date = datetime.strptime(first_inv_date_str, '%Y-%m-%d')
+                except Exception:
+                    parsed_date = datetime.today()
+                    
+                inv_month_name = get_arabic_month(parsed_date.month)
+                inv_year = parsed_date.year
+                
+                ws['A2'] = f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
+                
+                start_row = 6
+                
+                cat_col_map = {
+                    "الهاتف والبريد": "I",
+                    "الكهرباء": "J",
+                    "المياة": "K",
+                    "الصيانة": "O",
+                    "قرطاسيات ومطبوعات": "P",
+                    "نظافة": "R",
+                    "أخرى": "W"
+                }
+                
+                for idx, item in enumerate(invoices_data):
+                    current_row = start_row + idx
+                    
+                    ws[f'C{current_row}'] = item["statement"]
+                    ws[f'D{current_row}'] = item["account_no"]
+                    ws[f'E{current_row}'] = int(item["inv_no"]) if str(item["inv_no"]).isdigit() else item["inv_no"]
+                    ws[f'F{current_row}'] = item["inv_date"]
+                    ws[f'G{current_row}'] = item["tax_no"]
+                    ws[f'G{current_row}'].number_format = '@'
+                    ws[f'H{current_row}'] = item["supplier"]
+                    
+                    col_letter = cat_col_map.get(item["category"], "J")
+                    ws[f'{col_letter}{current_row}'] = item["amount"]
+                
+                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
+                wb.save(output_filename)
+                
+                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
+                
+                with open(output_filename, "rb") as file:
+                    st.download_button(
+                        label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
+                        data=file,
+                        file_name=output_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                st.link_button("🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف", "https://fanar.gqb.org.sa/requests/home")
+                
+            except Exception as e:
+                st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
+        else:
+            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
