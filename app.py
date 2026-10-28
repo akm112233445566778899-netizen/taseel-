@@ -1,10 +1,12 @@
-import streamlit as st
+
+   import streamlit as st
 import openpyxl
 from datetime import datetime
 import os
 import json
 from PIL import Image
 import google.generativeai as genai
+import pypdf
 
 st.set_page_config(
     page_title="أداة تفريغ العهود - 2026",
@@ -16,49 +18,68 @@ st.title("🏛️ أداة تفريغ العهود وإصدار أمر الصر�
 st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - نموذج الإدارة العامة 2026")
 st.divider()
 
-# مفتاح API الخاص بـ Gemini لقراءة الفواتير
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-def extract_invoice_data(image_file):
-    """دالة تقرأ الفاتورة واستخراج رقم الفاتورة والبيانات تلقائياً"""
-    if not API_KEY:
+def process_file_to_image(uploaded_file):
+    """تحويل ملف الـ PDF أو الصورة إلى كائن صورة جاهز للتحليل"""
+    try:
+        if uploaded_file.type == "application/pdf":
+            # استخراج النص من PDF إن أمكن أو معالجته كصورة
+            reader = pypdf.PdfReader(uploaded_file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() or ""
+            return text
+        else:
+            return Image.open(uploaded_file)
+    except Exception:
         return None
+
+def extract_invoice_data(uploaded_file):
+    """استخراج رقم الفاتورة والرقم الضريبي والمبالغ والمورد من الفاتورة"""
+    if not API_KEY:
+        return {}
     try:
         genai.configure(api_key=API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
-        image = Image.open(image_file)
         
+        content_input = process_file_to_image(uploaded_file)
+        if not content_input:
+            return {}
+            
         prompt = """
-        استخرج البيانات التالية من الفاتورة بدقة وأرجعها بصيغة JSON فقط بهذا الشكل:
+        اقرأ هذه الفاتورة بدقة واستخرج البيانات التالية بصيغة JSON فقط:
         {
             "inv_no": "رقم الفاتورة",
             "supplier": "اسم المورد",
             "tax_no": "الرقم الضريبي للمورد",
-            "amount": "المبلغ قبل الضريبة كعدد",
+            "amount": "المبلغ الخاضع للضريبة كعدد",
             "tax_amount": "مبلغ الضريبة كعدد"
         }
-        إذا لم تجد أي عنصر اترك قيمته نص فارغ "". لا تضف أي كلام إضافي خارج الـ JSON.
+        تأكد من استخراج رقم الفاتورة والرقم الضريبي بدقة وبدون أخطاء. لا تضف أي نص خارج JSON.
         """
         
-        response = model.generate_content([image, prompt])
+        response = model.generate_content([content_input, prompt])
         clean_json = response.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_json)
-        return data
-    except Exception as e:
-        return None
+        return json.loads(clean_json)
+    except Exception:
+        return {}
 
-st.subheader("1️⃣ رفع الفاتورة")
-uploaded_file = st.file_uploader("التقط صورة للفاتورة أو اسحب ملف الفاتورة هنا", type=["pdf", "png", "jpg", "jpeg"])
+st.subheader("1️⃣ رفع الفواتير (حتى 5 فواتير)")
+uploaded_files = st.file_uploader(
+    "التقط صور الفواتير أو اسحب ملفات الـ PDF هنا (يمكنك تحديد حتى 5 فواتير معاً)", 
+    type=["pdf", "png", "jpg", "jpeg"],
+    accept_multiple_files=True
+)
 
-if uploaded_file:
-    st.success("✅ تم استلام الفاتورة بنجاح!")
-    
-    # محاولة قراءة رقم الفاتورة والبيانات تلقائياً
-    extracted_data = None
-    with st.spinner("🔍 جاري قراءة واستخراج رقم الفاتورة والبيانات تلقائياً..."):
-        extracted_data = extract_invoice_data(uploaded_file)
-    
+if uploaded_files:
+    if len(uploaded_files) > 5:
+        st.warning("⚠️ تم تحديد أكثر من 5 فواتير. سيتم معالجة أول 5 فواتير فقط.")
+        uploaded_files = uploaded_files[:5]
+        
+    st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
     st.divider()
+    
     st.subheader("2️⃣ مراجعة وتحديد البيانات")
     
     dar_list = [
@@ -86,52 +107,56 @@ if uploaded_file:
     
     dar_name = st.selectbox("اختر اسم الدار", dar_list)
     
-    # تعبئة القيم المستخرجة تلقائياً إذا تم العثور عليها
-    default_inv = extracted_data.get("inv_no", "") if extracted_data else ""
-    default_supplier = extracted_data.get("supplier", "شركة الكهرباء السعودية") if extracted_data else "شركة الكهرباء السعودية"
-    default_tax_no = extracted_data.get("tax_no", "") if extracted_data else ""
-    default_amount = float(extracted_data.get("amount", 0.0)) if (extracted_data and extracted_data.get("amount")) else 0.0
-    default_tax = float(extracted_data.get("tax_amount", 0.0)) if (extracted_data and extracted_data.get("tax_amount")) else 0.0
-
-    col1, col2 = st.columns(2)
-    with col1:
-        supplier = st.text_input("اسم المورد", value=default_supplier)
-        inv_no = st.text_input("رقم الفاتورة (مستخرج تلقائياً)", value=default_inv)
-        amount = st.number_input("المبلغ (بدون الضريبة)", value=default_amount, step=0.01)
-        tax_amount = st.number_input("مبلغ الضريبة", value=default_tax, step=0.01)
+    invoices_data = []
     
-    with col2:
-        tax_no = st.text_input("الرقم الضريبي", value=default_tax_no)
-        statement = st.text_input("البيان", value=f"سداد فاتورة - {dar_name}")
+    for idx, file in enumerate(uploaded_files):
+        st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
         
-        category = st.selectbox("بند الحساب (العمود)", [
-            "الكهرباء", 
-            "المياة", 
-            "الهاتف والبريد",
-            "الصيانة",
-            "قرطاسيات ومطبوعات",
-            "نظافة",
-            "أخرى"
-        ])
+        with st.spinner(f"🔍 جاري قراءة بيانات الفاتورة {idx + 1}..."):
+            ext_data = extract_invoice_data(file)
+            
+        col1, col2 = st.columns(2)
+        with col1:
+            supplier = st.text_input(f"اسم المورد #{idx+1}", value=ext_data.get("supplier", "شركة الكهرباء السعودية"), key=f"sup_{idx}")
+            inv_no = st.text_input(f"رقم الفاتورة #{idx+1}", value=ext_data.get("inv_no", ""), key=f"inv_{idx}")
+            amount = st.number_input(f"المبلغ بدون الضريبة #{idx+1}", value=float(ext_data.get("amount", 0.0) or 0.0), step=0.01, key=f"amt_{idx}")
+            tax_amount = st.number_input(f"مبلغ الضريبة #{idx+1}", value=float(ext_data.get("tax_amount", 0.0) or 0.0), step=0.01, key=f"tax_amt_{idx}")
+            
+        with col2:
+            tax_no = st.text_input(f"الرقم الضريبي #{idx+1}", value=ext_data.get("tax_no", ""), key=f"tax_{idx}")
+            statement = st.text_input(f"البيان #{idx+1}", value=f"سداد فاتورة - {dar_name}", key=f"st_{idx}")
+            category = st.selectbox(f"بند الحساب #{idx+1}", [
+                "الكهرباء", 
+                "المياة", 
+                "الهاتف والبريد",
+                "الصيانة",
+                "قرطاسيات ومطبوعات",
+                "نظافة",
+                "أخرى"
+            ], key=f"cat_{idx}")
+            
+        invoices_data.append({
+            "supplier": supplier,
+            "inv_no": inv_no,
+            "amount": amount,
+            "tax_amount": tax_amount,
+            "tax_no": tax_no,
+            "statement": statement,
+            "category": category
+        })
+        st.markdown("---")
 
-    st.divider()
     st.subheader("3️⃣ المعالجة والإرسال")
     
     if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        excel_path = "نموذج_العهدة_2026.xlsx"
+        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx"
         
         if os.path.exists(excel_path):
             try:
                 wb = openpyxl.load_workbook(excel_path)
                 ws = wb.active
                 
-                row = 5
-                
-                ws[f'C{row}'] = statement      # البيان
-                ws[f'D{row}'] = int(inv_no) if str(inv_no).isdigit() else inv_no # رقم الفاتورة
-                ws[f'E{row}'] = datetime.today().strftime('%Y-%m-%d')        # التاريخ
-                ws[f'F{row}'] = tax_no         # الرقم الضريبي
-                ws[f'G{row}'] = supplier       # اسم المورد
+                start_row = 5
                 
                 cat_col_map = {
                     "الكهرباء": "H",
@@ -143,14 +168,23 @@ if uploaded_file:
                     "أخرى": "U"
                 }
                 
-                col_letter = cat_col_map.get(category, "H")
-                ws[f'{col_letter}{row}'] = amount        # المبلغ في عمود البند
-                ws[f'V{row}'] = tax_amount               # مبلغ الضريبة
+                for idx, item in enumerate(invoices_data):
+                    current_row = start_row + idx
+                    
+                    ws[f'C{current_row}'] = item["statement"]
+                    ws[f'D{current_row}'] = int(item["inv_no"]) if str(item["inv_no"]).isdigit() else item["inv_no"]
+                    ws[f'E{current_row}'] = datetime.today().strftime('%Y-%m-%d')
+                    ws[f'F{current_row}'] = item["tax_no"]
+                    ws[f'G{current_row}'] = item["supplier"]
+                    
+                    col_letter = cat_col_map.get(item["category"], "H")
+                    ws[f'{col_letter}{current_row}'] = item["amount"]
+                    ws[f'V{current_row}'] = item["tax_amount"]
                 
                 output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
                 wb.save(output_filename)
                 
-                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) ورقم الفاتورة ({inv_no}) بنجاح!")
+                st.success(f"🎉 تم تفريغ {len(invoices_data)} فاتورة لـ ({dar_name}) في ملف Excel بنجاح!")
                 
                 with open(output_filename, "rb") as file:
                     st.download_button(
@@ -165,4 +199,4 @@ if uploaded_file:
             except Exception as e:
                 st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
         else:
-            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع، يُرجى التأكد من رفعه بنفس الاسم.")
+            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع، يُرجى التأكد من مطابقة اسم الملف.")
