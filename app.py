@@ -222,4 +222,38 @@ if uploaded_files:
                     
                     ws[f'C{current_row}'] = item["statement"]
                     ws[f'D{current_row}'] = item["account_no"]
-                    ws[f'E{current_row}'] = int(item["inv_no"]) if
+                    
+                    # صياغة صريحة لرقم الفاتورة لتفادي أي خطأ
+                    raw_inv = str(item["inv_no"]).strip()
+                    if raw_inv.isdigit():
+                        ws[f'E{current_row}'] = int(raw_inv)
+                    else:
+                        ws[f'E{current_row}'] = raw_inv
+                        
+                    ws[f'F{current_row}'] = item["inv_date"]
+                    ws[f'G{current_row}'] = item["tax_no"]
+                    ws[f'G{current_row}'].number_format = '@'
+                    ws[f'H{current_row}'] = item["supplier"]
+                    
+                    col_letter = cat_col_map.get(item["category"], "J")
+                    ws[f'{col_letter}{current_row}'] = item["amount"]
+                
+                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
+                wb.save(output_filename)
+                
+                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
+                
+                with open(output_filename, "rb") as file:
+                    st.download_button(
+                        label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
+                        data=file,
+                        file_name=output_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                st.link_button("الذهاب إلى منصة فنار لإنشاء أمر الصرف", "https://fanar.gqb.org.sa/requests/home")
+                
+            except Exception as e:
+                st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
+        else:
+            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
