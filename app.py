@@ -78,21 +78,18 @@ def parse_pdf_invoice_robust(uploaded_file):
         if acc_m:
             data["account_no"] = acc_m.group(1)
 
-        # 3. استخراج تاريخ بداية الاستحقاق (استبعاد تواريخ بداية ونهاية الفترة)
+        # 3. استخراج تاريخ بداية الاستحقاق (تاريخ الفاتورة الأصلي)
         all_dates_raw = re.findall(r'(\d{2}[-/]\d{2}[-/]\d{4})', full_text_raw) + re.findall(r'(\d{4}[-/]\d{2}[-/]\d{2})', full_text_raw)
         for d in all_dates_raw:
             d_eng = convert_arabic_digits(d).replace('/', '-')
             parts = d_eng.split('-')
-            # إذا كان التاريخ في أكتوبر (10) وهو تاريخ الفاتورة الأصلي
             if len(parts) == 3:
-                if len(parts[0]) == 4:
-                    if parts[1] == '10':
-                        data["inv_date"] = d_eng
-                        break
-                else:
-                    if parts[1] == '10':
-                        data["inv_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
-                        break
+                if len(parts[0]) == 4 and parts[1] == '10':
+                    data["inv_date"] = d_eng
+                    break
+                elif len(parts[2]) == 4 and parts[1] == '10':
+                    data["inv_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                    break
                         
         if not data["inv_date"] and all_dates_raw:
             d_first = convert_arabic_digits(all_dates_raw[0]).replace('/', '-')
@@ -104,8 +101,7 @@ def parse_pdf_invoice_robust(uploaded_file):
         if tax_m:
             data["tax_no"] = tax_m.group(1)
 
-        # 5. استخراج المبلغ غير شامل الضريبة بدقة متناهية
-        # أ) البحث عن سطر الإجمالي غير شامل الضريبة
+        # 5. استخراج المبلغ غير شامل الضريبة بدقة
         for line in lines:
             line_eng = convert_arabic_digits(line)
             if "غير شامل" in line or "الخاضع للضريبة" in line:
@@ -123,7 +119,6 @@ def parse_pdf_invoice_robust(uploaded_file):
             if data["amount"] > 0:
                 break
 
-        # ب) لو لم يجدها بالسطر المباشر، يقرأ المبلغ الخاضع للضريبة من الجدول
         if data["amount"] == 0.0:
             all_amts = re.findall(r'(\d{1,5}\.\d{2})', full_text)
             possible = []
@@ -229,4 +224,69 @@ if uploaded_files:
     st.subheader("3️⃣ المعالجة والإرسال")
     
     if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        excel_path = "نموذج عهد
+        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
+        
+        if os.path.exists(excel_path):
+            try:
+                wb = openpyxl.load_workbook(excel_path)
+                ws = wb.active
+                
+                first_inv_date_str = invoices_data[0]["inv_date"]
+                try:
+                    parsed_date = datetime.strptime(first_inv_date_str, '%Y-%m-%d')
+                except Exception:
+                    parsed_date = datetime.today()
+                    
+                inv_month_name = get_arabic_month(parsed_date.month)
+                inv_year = parsed_date.year
+                
+                ws['A2'] = f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
+                
+                start_row = 6
+                
+                cat_col_map = {
+                    "الهاتف والبريد": "I",
+                    "الكهرباء": "J",
+                    "المياة": "K",
+                    "الصيانة": "O",
+                    "قرطاسيات ومطبوعات": "P",
+                    "نظافة": "R",
+                    "أخرى": "W"
+                }
+                
+                for idx, item in enumerate(invoices_data):
+                    current_row = start_row + idx
+                    
+                    ws[f'C{current_row}'] = item["statement"]
+                    ws[f'D{current_row}'] = item["account_no"]
+                    
+                    raw_inv = str(item["inv_no"]).strip()
+                    ws[f'E{current_row}'] = int(raw_inv) if raw_inv.isdigit() else raw_inv
+                        
+                    ws[f'F{current_row}'] = item["inv_date"]
+                    ws[f'G{current_row}'] = item["tax_no"]
+                    ws[f'G{current_row}'].number_format = '@'
+                    ws[f'H{current_row}'] = item["supplier"]
+                    
+                    col_letter = cat_col_map.get(item["category"], "J")
+                    ws[f'{col_letter}{current_row}'] = item["amount"]
+                
+                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
+                wb.save(output_filename)
+                
+                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
+                
+                with open(output_filename, "rb") as file:
+                    st.download_button(
+                        label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
+                        data=file,
+                        file_name=output_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                st.link_button("🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف", "https://fanar.gqb.org.sa/requests/home")
+                
+            except Exception as e:
+                st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
+        else:
+            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
