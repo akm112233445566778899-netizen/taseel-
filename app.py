@@ -48,7 +48,7 @@ def extract_invoice_data(image_file):
         return None
 
 st.subheader("1️⃣ رفع الفاتورة")
-uploaded_file = st.file_uploader("التقط صورة للفاتورة أو اسحب ملف الفاتورة هنا", type=["png", "jpg", "jpeg"])
+uploaded_file = st.file_uploader("التقط صورة للفاتورة أو اسحب ملف الفاتورة هنا", type=["pdf", "png", "jpg", "jpeg"])
 
 if uploaded_file:
     st.success("✅ تم استلام الفاتورة بنجاح!")
