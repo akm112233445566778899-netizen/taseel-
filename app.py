@@ -76,7 +76,7 @@ def get_arabic_month(month_num):
 
 
 def parse_pdf_invoice_robust(uploaded_file):
-  """استخراج ديناميكي 100% للمبالغ والتاريخ الأصلي دون الاعتماد على قيم ثابتة"""
+  """استخراج موجه ودقيق لفواتير الكهرباء بدون تجميع أرقام وبدون تاريخ اليوم"""
   data = {
       "inv_no": "",
       "account_no": "",
@@ -112,104 +112,69 @@ def parse_pdf_invoice_robust(uploaded_file):
     if tax_m:
       data["tax_no"] = tax_m.group(1)
 
-    # 4. استخراج تاريخ الفاتورة الأصلي بدقة (تجنب تواريخ فترة الاستهلاك)
-    # البحث المباشر عن تاريخ الفاتورة بجانب "تاريخ الفاتورة" أو "تاريخ بداية الاستحقاق"
-    inv_date_found = ""
+    # 4. استخراج تاريخ الفاتورة الأصلي المباشر (استبعاد تواريخ الفترة مثل 2026-09-09)
+    # البحث المباشر عن السطر الحاوي على "تاريخ الفاتورة" أو التواريخ الواقعة بأسفل ملخص الفاتورة
+    found_inv_date = ""
     for line in lines:
       line_eng = convert_arabic_digits(line)
       if "تاريخ الفاتورة" in line_eng or "تاريخ بداية الاستحقاق" in line_eng:
-        dates_in_line = re.findall(
+        dates = re.findall(
             r"(\d{2}[-/]\d{2}[-/]\d{4}|\d{4}[-/]\d{2}[-/]\d{2})", line_eng
         )
-        if dates_in_line:
-          inv_date_found = dates_in_line[0]
+        if dates:
+          found_inv_date = dates[0]
           break
 
-    if inv_date_found:
-      d_clean = inv_date_found.replace("/", "-")
-      parts = d_clean.split("-")
-      data["inv_date"] = (
-          f"{parts[2]}-{parts[1]}-{parts[0]}"
-          if len(parts[0]) != 4
-          else d_clean
-      )
-    else:
-      # التقاط كافة التواريخ وترجيح التاريخ المتأخر (تاريخ الإصدار) لتجنب تاريخ بداية الاستهلاك
-      all_dates_raw = re.findall(
+    # إذا لم يجد السطر بالكلمة، يتجنب أول تاريخين (تواريخ الفترة) ويأخذ التاريخ الثالث (تاريخ الإصدار)
+    if not found_inv_date:
+      all_dates = re.findall(
           r"(\d{2}[-/]\d{2}[-/]\d{4}|\d{4}[-/]\d{2}[-/]\d{2})", full_text
       )
-      valid_dates = []
-      for d in all_dates_raw:
-        d_eng = convert_arabic_digits(d).replace("/", "-")
-        p = d_eng.split("-")
-        try:
-          dt = (
-              datetime.strptime(d_eng, "%Y-%m-%d")
-              if len(p[0]) == 4
-              else datetime.strptime(
-                  f"{p[2]}-{p[1]}-{p[0]}", "%Y-%m-%d"
-              )
-          )
-          valid_dates.append(dt)
-        except Exception:
-          pass
-      if valid_dates:
-        # ترتيب التواريخ تنازلياً وأخذ الأحدث (تاريخ الإصدار/الاستحقاق بدلاً من بداية الاستهلاك)
-        valid_dates.sort(reverse=True)
-        data["inv_date"] = valid_dates[0].strftime("%Y-%m-%d")
+      # تصفية التواريخ لاستبعاد تاريخ بداية الفترة وتاريخ نهايتها
+      if len(all_dates) >= 3:
+        found_inv_date = all_dates[2]  # تاريخ الفاتورة الأصلي المكتوب أسفل الجدول
+      elif all_dates:
+        found_inv_date = all_dates[-1]
 
-    # 5. استخراج المبلغ بدون ضريبة بشكل متغيّر وديناميكي 100%
-    # أ) محاولة قراءة المبلغ الخاضع للضريبة المباشر من جدول التفاصيل
-    subtotal_found = 0.0
+    if found_inv_date:
+      d_clean = found_inv_date.replace("/", "-")
+      parts = d_clean.split("-")
+      if len(parts) == 3:
+        if len(parts[0]) == 4:
+          data["inv_date"] = d_clean
+        else:
+          data["inv_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
+
+    # 5. استخراج المبلغ بدون الضريبة المباشر
+    subtotal_val = 0.0
+
+    # البحث عن السطر المكتوب فيه "المبلغ الخاضع للضريبة" صراحة
     for line in lines:
       line_eng = convert_arabic_digits(line)
-      if (
-          "المبلغ الخاضع للضريبة" in line_eng
-          or "إجمالي المبلغ (غير شامل" in line_eng
-      ) and "استهلاك" not in line_eng:
-        amounts = re.findall(r"[\d,]+\.\d{2}", line_eng)
-        for val_str in amounts:
-          v = float(val_str.replace(",", ""))
-          if v > 10.0 and v != 10197.0:
-            subtotal_found = v
+      if "المبلغ الخاضع للضريبة" in line_eng:
+        m_vals = re.findall(r"[\d,]+\.\d{2}", line_eng)
+        if m_vals:
+          v = float(m_vals[0].replace(",", ""))
+          if v > 0 and v != 10197.0:
+            subtotal_val = v
             break
-      if subtotal_found > 0:
-        break
 
-    if subtotal_found > 0:
-      data["amount"] = round(subtotal_found, 2)
-    else:
-      # ب) استخراج إجمالي المبلغ شامل الضريبة وقسمته على 1.15 بشكل متغيّر
-      total_with_tax = 0.0
+    # إذا لم يجد المبلغ الخاضع، يلتقط "المبلغ المطلوب سداده" الصريح ويقسمه على 1.15
+    if subtotal_val == 0.0:
       for line in lines:
         line_eng = convert_arabic_digits(line)
         if (
             "المبلغ المطلوب سداده" in line_eng
-            or "شامل الضريبة" in line_eng
             or "إجمالي الفاتورة" in line_eng
         ):
-          amounts = re.findall(r"[\d,]+\.\d{2}", line_eng)
-          for val_str in amounts:
-            v = float(val_str.replace(",", ""))
-            if v > 10.0 and v != 10197.0:
-              total_with_tax = v
+          m_vals = re.findall(r"[\d,]+\.\d{2}", line_eng)
+          if m_vals:
+            total_v = float(m_vals[0].replace(",", ""))
+            if total_v > 0 and total_v != 10197.0:
+              subtotal_val = round(total_v / 1.15, 2)
               break
-        if total_with_tax > 0:
-          break
 
-      if total_with_tax > 0:
-        data["amount"] = round(total_with_tax / 1.15, 2)
-      else:
-        # ج) البحث عن أكبر مبلغ مالي متوفر بالفاتورة وقسمته ديناميكياً
-        all_amounts = re.findall(r"[\d,]+\.\d{2}", full_text)
-        cleaned_vals = []
-        for a in all_amounts:
-          v = float(a.replace(",", ""))
-          if 10.0 <= v <= 500000.0 and v != 10197.0:
-            cleaned_vals.append(v)
-        if cleaned_vals:
-          max_v = max(cleaned_vals)
-          data["amount"] = round(max_v / 1.15, 2)
+    data["amount"] = subtotal_val
 
   except Exception:
     pass
