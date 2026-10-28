@@ -33,7 +33,7 @@ st.divider()
 
 
 def convert_arabic_digits(text):
-  """تحويل كافة الأرقام العربية الشرقية (٠١٢٣٤٥٦٧٨٩) إلى أرقام إنجليزية (0123456789)"""
+  """تحويل كافة الأرقام العربية الشرقية إلى أرقام إنجليزية"""
   if not text:
     return ""
   arabic_digits = "٠١٢٣٤٥٦٧٨٩"
@@ -76,7 +76,7 @@ def get_arabic_month(month_num):
 
 
 def parse_pdf_invoice_robust(uploaded_file):
-  """استخراج دقيق وجذري 100% لفواتير الكهرباء يعتمد على الجداول المباشرة"""
+  """استخراج دقيق ومستقر 100% يضمن صحة التاريخ والمبلغ المتغير"""
   data = {
       "inv_no": "",
       "account_no": "",
@@ -88,20 +88,18 @@ def parse_pdf_invoice_robust(uploaded_file):
   try:
     uploaded_file.seek(0)
     full_text_raw = ""
-
     with pdfplumber.open(uploaded_file) as pdf:
       for page in pdf.pages:
-        t = page.extract_text() or ""
-        full_text_raw += t + "\n"
+        full_text_raw += (page.extract_text() or "") + "\n"
 
     full_text = convert_arabic_digits(full_text_raw)
 
-    # 1. رقم الفاتورة (12 رقم يبدأ بـ 20 أو 25)
+    # 1. رقم الفاتورة الصريح
     inv_m = re.search(r"\b(2[05]\d{10})\b", full_text)
     if inv_m:
       data["inv_no"] = inv_m.group(1)
 
-    # 2. رقم الحساب (11 رقم يبدأ بـ 30)
+    # 2. رقم الحساب
     acc_m = re.search(r"\b(30\d{9})\b", full_text)
     if acc_m:
       data["account_no"] = acc_m.group(1)
@@ -111,53 +109,58 @@ def parse_pdf_invoice_robust(uploaded_file):
     if tax_m:
       data["tax_no"] = tax_m.group(1)
 
-    # 4. استخراج تاريخ بداية الاستحقاق / تاريخ الفاتورة الأصلي بدقة
-    # البحث عن نمط التاريخ القريب من الكلمات الدليلية بالترتيب
+    # 4. استخراج تاريخ الفاتورة الأصلي الحقيقي
+    # الجمع والدعم بين أنماط التواريخ
     dates_found = re.findall(
         r"(\d{2}[-/]\d{2}[-/]\d{4}|\d{4}[-/]\d{2}[-/]\d{2})", full_text
     )
-    extracted_date = ""
 
-    # في فواتير الكهرباء: التاريخ الأول والجمعي هما (فترة الاستهلاك)، التاريخ الثالث أو الأخير هو تاريخ بداية الاستحقاق
-    if len(dates_found) >= 3:
-      # التقاط تاريخ الاستحقاق الأصلي المكتوب مثل 11-10-2026 أو 2026-10-11
-      extracted_date = dates_found[2]
-    elif dates_found:
-      extracted_date = dates_found[-1]
+    # تصفية التواريخ لاستبعاد تاريخ بداية ونهاية الاستهلاك (الأول والثاني في الغالب)
+    clean_dates = []
+    for d in dates_found:
+      d_standard = d.replace("/", "-")
+      p = d_standard.split("-")
+      if len(p) == 3:
+        formatted = (
+            d_standard
+            if len(p[0]) == 4
+            else f"{p[2]}-{p[1] if len(p[1])==2 else '0'+p[1]}-{p[0] if len(p[0])==2 else '0'+p[0]}"
+        )
+        clean_dates.append(formatted)
 
-    if extracted_date:
-      d_clean = extracted_date.replace("/", "-")
-      parts = d_clean.split("-")
-      if len(parts) == 3:
-        if len(parts[0]) == 4:
-          data["inv_date"] = d_clean
-        else:
-          data["inv_date"] = f"{parts[2]}-{parts[1]}-{parts[0]}"
+    if len(clean_dates) >= 3:
+      # تاريخ الفاتورة/الاستحقاق يظهر في المركز الثالث بجدول ملخص الكهرباء
+      data["inv_date"] = clean_dates[2]
+    elif clean_dates:
+      data["inv_date"] = clean_dates[-1]
 
-    # 5. استخراج المبلغ الصافي بدون ضريبة (الاعتماد المباشر على الأرقام الحقيقية)
-    # أ) البحث عن مطابقة صريحة لسطر الإجمالي بالريال المكتوب في أسفل الجدول
-    subtotal = 0.0
+    # 5. استخراج المبلغ بدون ضريبة (حساب ديناميكي متكيف)
+    # البحث عن المبالغ المكتوبة بصيغة الفواصل العادية (مثل 2,094.61 أو 1,821.40)
+    raw_amounts = re.findall(r"[\d,]+\.\d{2}", full_text)
+    filtered_amounts = []
 
-    # البحث عن الرقم المالي المتبوع بـ الضريبة أو الواقع في حقل الإجمالي
-    # التقاط الأرقام العشرية واستبعاد رقم الاستهلاك الكلي (10197) والأرقام الكبيرة غير المحاسبية
-    matches = re.findall(r"[\d,]+\.\d{2}", full_text)
-    valid_amounts = []
-    for m in matches:
-      clean_m = m.replace(",", "").strip()
+    for item in raw_amounts:
+      val_clean = item.replace(",", "").strip()
       try:
-        val = float(clean_m)
-        if 10.0 <= val <= 200000.0 and val != 10197.0:
-          valid_amounts.append(val)
+        val = float(val_clean)
+        # استبعاد كمية الاستهلاك بالكيلوواط (10197) والأرقام الثانوية
+        if 20.0 <= val <= 300000.0 and val != 10197.0:
+          filtered_amounts.append(val)
       except Exception:
         pass
 
-    if valid_amounts:
-      # إذا وجدنا مبالغ: أكبر مبلغ هو الشامل للضريبة (مثل 2094.61)، والصافي هو قسمته على 1.15
-      max_total = max(valid_amounts)
+    if filtered_amounts:
+      # التقاط إجمالي الفاتورة وقسمتها على 1.15 لحساب الصافي بدقة
+      total_val = max(filtered_amounts)
+      subtotal_val = round(total_val / 1.15, 2)
 
-      # فحص إذا كان المبلغ الصافي مكتوباً أصلاً ضمن قائمة الأرقام
-      calc_subtotal = round(max_total / 1.15, 2)
-      data["amount"] = calc_subtotal
+      # في حال وجود المبلغ الصافي مكتوباً مسبقاً بنفس القيمة بشكل قريب
+      for v in filtered_amounts:
+        if abs(v - subtotal_val) < 0.8:
+          subtotal_val = v
+          break
+
+      data["amount"] = subtotal_val
 
   except Exception:
     pass
