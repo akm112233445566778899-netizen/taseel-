@@ -66,7 +66,6 @@ def parse_pdf_invoice_dynamic(uploaded_file):
                 text = page.extract_text() or ""
                 full_text_raw += text + "\n"
         
-        # تحويل النص كاملاً لأرقام إنجليزية لسهولة المطابقة
         full_text = convert_arabic_digits(full_text_raw)
         
         # 1. استخراج رقم الفاتورة الديناميكي المتغير
@@ -102,7 +101,7 @@ def parse_pdf_invoice_dynamic(uploaded_file):
         if tax_match:
             data["tax_no"] = tax_match.group(1)
 
-        # 5. استخراج المبلغ غير شامل الضريبة ديناميكياً
+        # 5. استخراج المبلغ غير شامل الضريبة
         amt_match = re.search(r'غير\s*شامل[^\d]*(\d+[\.,]\d{2})', full_text) or re.search(r'الخاضع\s*للضريبة[^\d]*(\d+[\.,]\d{2})', full_text)
         if amt_match:
             raw_amt = amt_match.group(1).replace(',', '.')
@@ -111,7 +110,6 @@ def parse_pdf_invoice_dynamic(uploaded_file):
             except Exception:
                 pass
         else:
-            # البحث عن جميع أرقام المبالغ العشرية في المستند واختيار المبلغ الصحيح
             amounts = re.findall(r'(\d+\.\d{2})', full_text)
             possible_amounts = []
             for a in amounts:
@@ -200,70 +198,4 @@ if uploaded_files:
             written_amount = tafqeet_arabic(estimated_total)
             written_text = st.text_input(f"المبلغ كتابةً (تفقيط) #{idx+1}", value=written_amount, key=f"writ_{idx}")
 
-        invoices_data.append({
-            "supplier": supplier,
-            "inv_no": inv_no,
-            "account_no": account_no,
-            "inv_date": inv_date,
-            "amount": amount,
-            "tax_no": tax_no,
-            "statement": statement,
-            "category": category,
-            "written_amount": written_text
-        })
-        st.markdown("---")
-
-    st.subheader("3️⃣ المعالجة والإرسال")
-    
-    if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
-        
-        if os.path.exists(excel_path):
-            try:
-                wb = openpyxl.load_workbook(excel_path)
-                ws = wb.active
-                
-                # تحديث عنوان الخلية A2 بشهر الفاتورة واسم الدار
-                first_inv_date_str = invoices_data[0]["inv_date"]
-                try:
-                    parsed_date = datetime.strptime(first_inv_date_str, '%Y-%m-%d')
-                except Exception:
-                    parsed_date = datetime.today()
-                    
-                inv_month_name = get_arabic_month(parsed_date.month)
-                inv_year = parsed_date.year
-                
-                ws['A2'] = f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
-                
-                start_row = 6
-                
-                cat_col_map = {
-                    "الهاتف والبريد": "I",
-                    "الكهرباء": "J",
-                    "المياة": "K",
-                    "الصيانة": "O",
-                    "قرطاسيات ومطبوعات": "P",
-                    "نظافة": "R",
-                    "أخرى": "W"
-                }
-                
-                for idx, item in enumerate(invoices_data):
-                    current_row = start_row + idx
-                    
-                    ws[f'C{current_row}'] = item["statement"]
-                    ws[f'D{current_row}'] = item["account_no"]
-                    ws[f'E{current_row}'] = int(item["inv_no"]) if str(item["inv_no"]).isdigit() else item["inv_no"]
-                    ws[f'F{current_row}'] = item["inv_date"]
-                    ws[f'G{current_row}'] = item["tax_no"]
-                    ws[f'G{current_row}'].number_format = '@'
-                    ws[f'H{current_row}'] = item["supplier"]
-                    
-                    col_letter = cat_col_map.get(item["category"], "J")
-                    ws[f'{col_letter}{current_row}'] = item["amount"]
-                
-                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
-                wb.save(output_filename)
-                
-                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) وتصشيح رقم الفاتورة وشهر الفاتورة بنجاح!")
-                
-                with open(output_filename, "rb") as file
+        invoices_data
