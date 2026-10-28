@@ -48,7 +48,6 @@ def extract_invoice_with_ai(uploaded_file):
         genai.configure(api_key=API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # حفظ الملف مؤقتاً لرفعه للتحليل البصري الشامل
         suffix = ".pdf" if uploaded_file.type == "application/pdf" else ".png"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             uploaded_file.seek(0)
@@ -80,7 +79,6 @@ def extract_invoice_with_ai(uploaded_file):
         
         response = model.generate_content([sample_file, prompt])
         
-        # تنظيف الملف المؤقت
         os.remove(tmp_path)
         try:
             genai.delete_file(sample_file.name)
@@ -136,114 +134,4 @@ if uploaded_files:
         "دار الطرفية"
     ]
     
-    dar_name = st.selectbox("اختر اسم الدار", dar_list)
-    
-    invoices_data = []
-    
-    for idx, file in enumerate(uploaded_files):
-        st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
-        
-        ext_data = {}
-        if API_KEY:
-            with st.spinner(f"🔍 جاري فحص وقراءة بيانات الفاتورة #{idx + 1} بالذكاء الاصطناعي..."):
-                ext_data = extract_invoice_with_ai(file)
-            
-        col1, col2 = st.columns(2)
-        with col1:
-            supplier = st.text_input(f"اسم المورد #{idx+1}", value=ext_data.get("supplier", "الشركة السعودية للكهرباء"), key=f"sup_{idx}")
-            inv_no = st.text_input(f"رقم الفاتورة #{idx+1}", value=str(ext_data.get("inv_no", "")), key=f"inv_{idx}")
-            account_no = st.text_input(f"رقم الحساب #{idx+1}", value=str(ext_data.get("account_no", "")), key=f"acc_{idx}")
-            inv_date = st.text_input(f"تاريخ الفاتورة #{idx+1}", value=str(ext_data.get("inv_date", "")), key=f"date_{idx}")
-            
-        with col2:
-            tax_no = st.text_input(f"الرقم الضريبي #{idx+1}", value=str(ext_data.get("tax_no", "300000361310003")), key=f"tax_{idx}")
-            amount = st.number_input(f"المبلغ بدون الضريبة #{idx+1}", value=float(ext_data.get("amount", 0.0) or 0.0), step=0.01, key=f"amt_{idx}")
-            statement = st.text_input(f"البيان #{idx+1}", value=f"سداد فاتورة كهرباء - {dar_name}", key=f"st_{idx}")
-            category = st.selectbox(f"بند الحساب #{idx+1}", [
-                "الكهرباء", 
-                "المياة", 
-                "الهاتف والبريد",
-                "الصيانة",
-                "قرطاسيات ومطبوعات",
-                "نظافة",
-                "أخرى"
-            ], key=f"cat_{idx}")
-            
-            estimated_total = amount * 1.15
-            written_amount = tafqeet_arabic(estimated_total)
-            written_text = st.text_input(f"المبلغ كتابةً (تفقيط) #{idx+1}", value=written_amount, key=f"writ_{idx}")
-
-        invoices_data.append({
-            "supplier": supplier,
-            "inv_no": inv_no,
-            "account_no": account_no,
-            "inv_date": inv_date,
-            "amount": amount,
-            "tax_no": tax_no,
-            "statement": statement,
-            "category": category,
-            "written_amount": written_text
-        })
-        st.markdown("---")
-
-    st.subheader("3️⃣ المعالجة والإرسال")
-    
-    if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
-        
-        if os.path.exists(excel_path):
-            try:
-                wb = openpyxl.load_workbook(excel_path)
-                ws = wb.active
-                
-                first_inv_date_str = invoices_data[0]["inv_date"]
-                try:
-                    parsed_date = datetime.strptime(first_inv_date_str, '%Y-%m-%d')
-                except Exception:
-                    parsed_date = datetime.today()
-                    
-                inv_month_name = get_arabic_month(parsed_date.month)
-                inv_year = parsed_date.year
-                
-                ws['A2'] = f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
-                
-                start_row = 6
-                
-                cat_col_map = {
-                    "الهاتف والبريد": "I",
-                    "الكهرباء": "J",
-                    "المياة": "K",
-                    "الصيانة": "O",
-                    "قرطاسيات ومطبوعات": "P",
-                    "نظافة": "R",
-                    "أخرى": "W"
-                }
-                
-                for idx, item in enumerate(invoices_data):
-                    current_row = start_row + idx
-                    
-                    ws[f'C{current_row}'] = item["statement"]
-                    ws[f'D{current_row}'] = item["account_no"]
-                    ws[f'E{current_row}'] = int(item["inv_no"]) if str(item["inv_no"]).isdigit() else item["inv_no"]
-                    ws[f'F{current_row}'] = item["inv_date"]
-                    ws[f'G{current_row}'] = item["tax_no"]
-                    ws[f'G{current_row}'].number_format = '@'
-                    ws[f'H{current_row}'] = item["supplier"]
-                    
-                    col_letter = cat_col_map.get(item["category"], "J")
-                    ws[f'{col_letter}{current_row}'] = item["amount"]
-                
-                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
-                wb.save(output_filename)
-                
-                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
-                
-                with open(output_filename, "rb") as file:
-                    st.download_button(
-                        label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
-                        data=file,
-                        file_name=output_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                
-                st.link_button("🌐 الذهاب إلى
+    dar_name = st.selectbox("
