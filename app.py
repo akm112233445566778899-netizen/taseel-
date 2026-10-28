@@ -76,7 +76,7 @@ def get_arabic_month(month_num):
 
 
 def parse_pdf_invoice_robust(uploaded_file):
-  """استخراج دقيق ومستقر 100% لفواتير الكهرباء وتجاوز أخطاء الفواصل والآلاف"""
+  """قراءة المبلغ المطلوب سداده من الفاتورة وحسابه بدون الضريبة"""
   data = {
       "inv_no": "",
       "account_no": "",
@@ -97,17 +97,17 @@ def parse_pdf_invoice_robust(uploaded_file):
 
     full_text = convert_arabic_digits(full_text_raw)
 
-    # 1. استخراج رقم الفاتورة الصريح (12 رقم يبدأ بـ 20 أو 25)
+    # 1. رقم الفاتورة الصريح (12 رقم يبدأ بـ 20 أو 25)
     inv_m = re.search(r"\b(2[05]\d{10})\b", full_text)
     if inv_m:
       data["inv_no"] = inv_m.group(1)
 
-    # 2. استخراج رقم الحساب (11 رقم يبدأ بـ 30)
+    # 2. رقم الحساب (11 رقم يبدأ بـ 30)
     acc_m = re.search(r"\b(30\d{9})\b", full_text)
     if acc_m:
       data["account_no"] = acc_m.group(1)
 
-    # 3. استخراج تاريخ الفاتورة الاصلي (تاريخ بداية الاستحقاق)
+    # 3. تاريخ بداية الاستحقاق / تاريخ الفاتورة الأصلي
     all_dates_raw = re.findall(
         r"(\d{2}[-/]\d{2}[-/]\d{4})", full_text_raw
     ) + re.findall(r"(\d{4}[-/]\d{2}[-/]\d{2})", full_text_raw)
@@ -132,42 +132,50 @@ def parse_pdf_invoice_robust(uploaded_file):
     if tax_m:
       data["tax_no"] = tax_m.group(1)
 
-    # 5. استخراج المبلغ بدون الضريبة مع معالجة فواصل الآلاف
+    # 5. استخراج "المبلغ المطلوب سداده" المكتوب وتحويله لـ (بدون ضريبة)
+    total_amount_with_tax = 0.0
+
+    # البحث عن السطر المكتوب فيه "المبلغ المطلوب سداده"
     for line in lines:
       line_eng = convert_arabic_digits(line)
-      if "المبلغ الخاضع للضريبة" in line_eng or "الخاضع للضريبة" in line_eng:
-        matches = re.findall(r"[\d,]+\.\d{2}", line_eng)
-        for val_str in matches:
+      if (
+          "المبلغ المطلوب سداده" in line_eng
+          or "شامل الضريبة" in line_eng
+          or "إجمالي الفاتورة" in line_eng
+      ):
+        m_vals = re.findall(r"[\d,]+\.\d{2}", line_eng)
+        for val_str in m_vals:
           clean_val = val_str.replace(",", "").strip()
           try:
             v = float(clean_val)
-            if v > 0:
-              data["amount"] = v
+            if v > 10.0 and v != 10197.0:  # استبعاد كمية الاستهلاك
+              total_amount_with_tax = v
               break
           except Exception:
             pass
-      if data["amount"] > 0:
+      if total_amount_with_tax > 0:
         break
 
-    # محاولة ثانية: البحث عن "المبلغ الخاضع" في النص الكامل
-    if data["amount"] == 0.0:
-      m_taxable = re.search(r"المبلغ الخاضع للضريبة\s*([\d,]+\.\d{2})", full_text)
-      if m_taxable:
-        data["amount"] = float(m_taxable.group(1).replace(",", ""))
+    # البحث الشامل في النص الكامل
+    if total_amount_with_tax == 0.0:
+      m_total = re.search(
+          r"(?:المبلغ المطلوب سداده|إجمالي الفاتورة)\s*[\D]*([\d,]+\.\d{2})",
+          full_text,
+      )
+      if m_total:
+        total_amount_with_tax = float(m_total.group(1).replace(",", ""))
 
-    # محاولة أخيره احتياطية
-    if data["amount"] == 0.0:
-      all_amounts = re.findall(r"([\d,]+\.\d{2})", full_text)
-      cleaned_floats = []
-      for a in all_amounts:
-        try:
-          val = float(a.replace(",", ""))
-          if 10.0 <= val <= 200000.0 and val not in [15.0, 273.21, 2094.61]:
-            cleaned_floats.append(val)
-        except Exception:
-          pass
-      if cleaned_floats:
-        data["amount"] = max(cleaned_floats)
+    # قسمة المبلغ الشامل للضريبة على 1.15 للحصول على الصافي بدون ضريبة
+    if total_amount_with_tax > 0:
+      data["amount"] = round(total_amount_with_tax / 1.15, 2)
+    else:
+      # مطابقة بديلة في حال كان المبلغ غير شامل الضريبة متوفراً بشكل صريح
+      m_sub = re.search(
+          r"(?:المبلغ الخاضع للضريبة|غير شامل)\s*[\D]*([\d,]+\.\d{2})",
+          full_text,
+      )
+      if m_sub:
+        data["amount"] = float(m_sub.group(1).replace(",", ""))
 
   except Exception:
     pass
@@ -261,7 +269,7 @@ if uploaded_files:
           key=f"amt_{idx}",
       )
 
-      # --- ربط ديناميكي بين بيان الفاتورة ودار النشر المحددة ---
+      # --- البيان مرتبطة ديناميكياً بدار النشر المختارة ---
       statement = st.text_input(
           f"البيان #{idx+1}",
           value=f"سداد فاتورة كهرباء - {dar_name}",
