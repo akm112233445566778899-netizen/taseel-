@@ -1,8 +1,5 @@
-import io
 import os
 import re
-import zipfile
-from collections import Counter
 from datetime import datetime
 
 import openpyxl
@@ -35,66 +32,7 @@ else:
 
 st.divider()
 
-# ----------------------------------------------------------------------
-# الإعدادات العامة
-# ----------------------------------------------------------------------
 VAT_RATE = 0.15
-START_ROW = 6  # أول صف بيانات في جميع النماذج
-XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-# النموذج الأساسي (لكل البنود التي ليس لها ملف مستقل)
-MAIN_TEMPLATE = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
-
-# القيم الافتراضية لفواتير الكهرباء
-DEFAULT_SUPPLIER = "الشركة السعودية للكهرباء"
-DEFAULT_TAX_NO = "300000361310003"
-
-CATEGORIES = [
-    "الكهرباء",
-    "المياة",
-    "الهاتف والبريد",
-    "الصيانة",
-    "قرطاسيات ومطبوعات",
-    "نظافة",
-    "أخرى",
-]
-
-# عمود كل بند في النموذج الأساسي
-MAIN_CAT_COL_MAP = {
-    "الهاتف والبريد": "I",
-    "الكهرباء": "J",
-    "المياة": "K",
-    "الصيانة": "O",
-    "قرطاسيات ومطبوعات": "P",
-    "نظافة": "R",
-    "أخرى": "W",
-}
-
-# ----------------------------------------------------------------------
-# البنود التي يُخرج لها ملف إكسل مستقل
-# لإضافة بند جديد (مثلاً المياة) يكفي إضافة عنصر هنا + وضع ملف النموذج
-# الخاص به في مجلد التطبيق.
-#   template          : اسم ملف النموذج
-#   title             : عنوان التفريغ في الخلية A2
-#   file_name         : اسم الملف الناتج
-#   default_statement : البيان الافتراضي
-#   columns           : الأعمدة المتاحة للمبلغ في هذا النموذج (اسم -> حرف العمود)
-# ----------------------------------------------------------------------
-SEPARATE_FILES = {
-    "الصيانة": {
-        "template": "نموذج عهدة الصيانة 2026.xlsx",
-        "title": "تفريغ عهدة : صيانة {dar} {period} م -",
-        "file_name": "تفريغ_عهدة_صيانة_{dar}.xlsx",
-        "default_statement": "قيمة صيانة",
-        "columns": {
-            "الصيانة": "J",
-            "صيانة مباني": "O",
-            "صيانة سيارات": "V",
-        },
-    },
-}
-
-ARABIC_QUARTERS = {1: "الأول", 2: "الثاني", 3: "الثالث", 4: "الرابع"}
 
 
 # ----------------------------------------------------------------------
@@ -145,82 +83,6 @@ def get_arabic_month(month_num):
 
 def to_float(s):
     return float(convert_arabic_digits(s).replace(",", "").strip())
-
-
-def parse_date(s):
-    """يحوّل نص بصيغة YYYY-MM-DD إلى تاريخ، أو None إذا كان غير صالح"""
-    try:
-        return datetime.strptime(str(s).strip(), "%Y-%m-%d")
-    except Exception:
-        return None
-
-
-def guess_quarter_label(items):
-    """
-    يقترح فترة التفريغ (مثل: الربع الثالث 2026) حسب الربع الذي تقع فيه
-    أغلب الفواتير. عند التعادل يؤخذ الأقدم. المستخدم يقدر يعدّلها يدوياً.
-    """
-    quarters = []
-    for it in items:
-        dt = parse_date(it["inv_date"])
-        if dt:
-            quarters.append((dt.year, (dt.month - 1) // 3 + 1))
-    if not quarters:
-        today = datetime.today()
-        quarters = [(today.year, (today.month - 1) // 3 + 1)]
-    counts = Counter(quarters)
-    top = max(counts.values())
-    year, quarter = min(k for k, v in counts.items() if v == top)
-    return f"الربع {ARABIC_QUARTERS[quarter]} {year}"
-
-
-def safe_filename(text):
-    """اسم صالح للملفات: المسافات تصير _ وتُحذف الرموز الممنوعة"""
-    text = re.sub(r'[\\/:*?"<>|]', "", str(text)).strip()
-    return re.sub(r"\s+", "_", text)
-
-
-def write_invoice_row(ws, row, item, date_format=None):
-    """يكتب فاتورة واحدة في صف من النموذج (الخانات الفارغة تبقى فارغة)"""
-    ws[f"C{row}"] = item["statement"]
-
-    if item["account_no"]:
-        ws[f"D{row}"] = item["account_no"]
-
-    raw_inv = str(item["inv_no"]).strip()
-    if raw_inv.isdigit():
-        ws[f"E{row}"] = int(raw_inv)
-    elif raw_inv:
-        ws[f"E{row}"] = raw_inv
-
-    # حفظ التاريخ كتاريخ حقيقي في الإكسل (وليس نص)
-    inv_dt = parse_date(item["inv_date"])
-    if inv_dt:
-        ws[f"F{row}"] = inv_dt
-        if date_format:
-            ws[f"F{row}"].number_format = date_format
-    elif str(item["inv_date"]).strip():
-        ws[f"F{row}"] = item["inv_date"]
-
-    if item["tax_no"]:
-        ws[f"G{row}"] = item["tax_no"]
-        ws[f"G{row}"].number_format = "@"
-    if item["supplier"]:
-        ws[f"H{row}"] = item["supplier"]
-
-    ws[f"{item['amount_col']}{row}"] = float(item["amount"])
-
-
-def build_workbook(template_path, title, items, date_format=None):
-    """يفتح النموذج، يكتب العنوان والفواتير، ويرجع الملف كبايتات"""
-    wb = openpyxl.load_workbook(template_path)
-    ws = wb.active
-    ws["A2"] = title
-    for idx, item in enumerate(items):
-        write_invoice_row(ws, START_ROW + idx, item, date_format)
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
 
 
 # ----------------------------------------------------------------------
@@ -322,8 +184,8 @@ def parse_pdf_invoice_robust(uploaded_file):
         "account_no": "",
         "inv_date": "",
         "amount": 0.0,
-        "tax_no": DEFAULT_TAX_NO,
-        "supplier": DEFAULT_SUPPLIER,
+        "tax_no": "300000361310003",
+        "supplier": "الشركة السعودية للكهرباء",
         "raw_text": "",
         "error": "",
     }
@@ -398,17 +260,8 @@ dar_list = [
     "دار الطرفية",
 ]
 
-OTHER_DAR = "➕ دار أخرى (اكتب الاسم)"
-
 st.subheader("اختر الدار")
-dar_choice = st.selectbox("اختر اسم الدار المعنية", dar_list + [OTHER_DAR])
-if dar_choice == OTHER_DAR:
-    dar_name = st.text_input("اسم الدار", key="custom_dar_name").strip()
-    if not dar_name:
-        st.info("اكتب اسم الدار للمتابعة.")
-        st.stop()
-else:
-    dar_name = dar_choice
+dar_name = st.selectbox("اختر اسم الدار المعنية", dar_list)
 
 st.subheader("1️⃣ رفع الفواتير (حتى 5 فواتير)")
 uploaded_files = st.file_uploader(
@@ -446,31 +299,12 @@ if uploaded_files:
         with st.expander(f"عرض النص المستخرج للفاتورة #{idx + 1} (للفحص)"):
             st.text(ext_data.get("raw_text", ""))
 
-        # البند يُحدَّد أولاً لأن القيم الافتراضية تعتمد عليه
-        category = st.selectbox(
-            f"بند الحساب #{idx+1}",
-            CATEGORIES,
-            key=f"cat_{idx}",
-        )
-        sep_cfg = SEPARATE_FILES.get(category)
-
-        if sep_cfg:
-            st.caption(f"📁 فواتير «{category}» تُفرَّغ في ملف إكسل مستقل.")
-            # فواتير هذا البند من موردين مختلفين، فلا نفترض مورداً معيّناً
-            default_supplier = ""
-            default_tax_no = ""
-            default_statement = sep_cfg["default_statement"]
-        else:
-            default_supplier = ext_data.get("supplier", DEFAULT_SUPPLIER)
-            default_tax_no = str(ext_data.get("tax_no", DEFAULT_TAX_NO))
-            default_statement = f"سداد فاتورة كهرباء - {dar_name}"
-
         col1, col2 = st.columns(2)
         with col1:
             supplier = st.text_input(
                 f"اسم المورد #{idx+1}",
-                value=default_supplier,
-                key=f"sup_{idx}_{category}",
+                value=ext_data.get("supplier", "الشركة السعودية للكهرباء"),
+                key=f"sup_{idx}",
             )
             inv_no = st.text_input(
                 f"رقم الفاتورة #{idx+1}",
@@ -491,72 +325,42 @@ if uploaded_files:
         with col2:
             tax_no = st.text_input(
                 f"الرقم الضريبي #{idx+1}",
-                value=default_tax_no,
-                key=f"tax_{idx}_{category}",
+                value=str(ext_data.get("tax_no", "300000361310003")),
+                key=f"tax_{idx}",
             )
-
-            extracted_net = float(ext_data.get("amount", 0.0) or 0.0)
-
-            # فواتير الملفات المستقلة غالباً يكون المعلوم عندك هو الإجمالي،
-            # فنتيح إدخاله شامل الضريبة ونحسب المبلغ قبل الضريبة تلقائياً
-            if sep_cfg:
-                amount_mode = st.radio(
-                    f"المبلغ المُدخل #{idx+1}",
-                    ["قبل الضريبة", "شامل الضريبة"],
-                    horizontal=True,
-                    key=f"mode_{idx}",
-                )
-            else:
-                amount_mode = "قبل الضريبة"
-
-            if amount_mode == "شامل الضريبة":
-                gross = st.number_input(
-                    f"المبلغ شامل الضريبة #{idx+1}",
-                    value=round(extracted_net * (1 + VAT_RATE), 2),
-                    step=0.01,
-                    key=f"amt_{idx}_gross",
-                )
-                amount = round(gross / (1 + VAT_RATE), 2)
-                estimated_total = round(gross, 2)
-                st.caption(
-                    f"المبلغ قبل الضريبة المحسوب: {amount:,.2f} "
-                    "(هذا الرقم اللي ينكتب في الملف)"
-                )
-            else:
-                amount = st.number_input(
-                    f"المبلغ بدون الضريبة #{idx+1}",
-                    value=extracted_net,
-                    step=0.01,
-                    key=f"amt_{idx}",
-                )
-                estimated_total = round(amount + round(amount * VAT_RATE, 2), 2)
+            amount = st.number_input(
+                f"المبلغ بدون الضريبة #{idx+1}",
+                value=float(ext_data.get("amount", 0.0) or 0.0),
+                step=0.01,
+                key=f"amt_{idx}",
+            )
 
             statement = st.text_input(
                 f"البيان #{idx+1}",
-                value=default_statement,
-                key=f"st_{idx}_{dar_name}_{category}",
+                value=f"سداد فاتورة كهرباء - {dar_name}",
+                key=f"st_{idx}_{dar_name}",
             )
 
-            # عمود المبلغ في النموذج
-            if sep_cfg:
-                cols_map = sep_cfg["columns"]
-                if len(cols_map) > 1:
-                    sub_label = st.selectbox(
-                        f"نوع {category} #{idx+1}",
-                        list(cols_map),
-                        key=f"sub_{idx}_{category}",
-                    )
-                    amount_col = cols_map[sub_label]
-                else:
-                    amount_col = next(iter(cols_map.values()))
-            else:
-                amount_col = MAIN_CAT_COL_MAP.get(category, "J")
+            category = st.selectbox(
+                f"بند الحساب #{idx+1}",
+                [
+                    "الكهرباء",
+                    "المياة",
+                    "الهاتف والبريد",
+                    "الصيانة",
+                    "قرطاسيات ومطبوعات",
+                    "نظافة",
+                    "أخرى",
+                ],
+                key=f"cat_{idx}",
+            )
 
+            estimated_total = round(amount + round(amount * VAT_RATE, 2), 2)
             written_amount = tafqeet_arabic(estimated_total)
             written_text = st.text_input(
                 f"المبلغ كتابةً (تفقيط) #{idx+1}",
                 value=written_amount,
-                key=f"writ_{idx}_{estimated_total}",
+                key=f"writ_{idx}_{amount}",
             )
 
         invoices_data.append({
@@ -568,137 +372,98 @@ if uploaded_files:
             "tax_no": tax_no,
             "statement": statement,
             "category": category,
-            "amount_col": amount_col,
             "written_amount": written_text,
         })
         st.markdown("---")
 
-    # تقسيم الفواتير: ملفات مستقلة حسب البند + الباقي للنموذج الأساسي
-    main_items = [it for it in invoices_data if it["category"] not in SEPARATE_FILES]
-    sep_groups = {}
-    for cat in SEPARATE_FILES:
-        items = [it for it in invoices_data if it["category"] == cat]
-        if items:
-            sep_groups[cat] = items
-
     st.subheader("3️⃣ المعالجة والإرسال")
 
-    # فترة التفريغ لكل ملف مستقل (تظهر في عنوان الملف) — تُقترح تلقائياً وتتعدّل
-    period_labels = {}
-    for cat, items in sep_groups.items():
-        default_period = guess_quarter_label(items)
-        period_labels[cat] = st.text_input(
-            f"فترة تفريغ {cat} (تظهر في عنوان الملف)",
-            value=default_period,
-            key=f"period_{cat}_{default_period}",
-        )
-
-    plan = []
-    if main_items:
-        plan.append(f"الملف الأساسي ({len(main_items)} فاتورة)")
-    for cat, items in sep_groups.items():
-        plan.append(f"ملف {cat} ({len(items)} فاتورة)")
-    st.caption("سيتم إنشاء: " + " + ".join(plan))
-
-    # بصمة المدخلات: نعرض نتيجة التفريغ فقط ما دام ما تغيّر شي بعدها
-    fingerprint = repr((dar_name, invoices_data, period_labels))
-
     if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        files = []
+        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
 
-        # --- الملف الأساسي ---
-        if main_items:
-            if os.path.exists(MAIN_TEMPLATE):
-                try:
-                    parsed_date = parse_date(main_items[0]["inv_date"])
-                    if parsed_date is None:
-                        st.warning(
-                            "⚠️ تاريخ الفاتورة الأولى غير صالح (الصيغة المطلوبة"
-                            " YYYY-MM-DD)، تم استخدام تاريخ اليوم في عنوان التفريغ."
-                        )
-                        parsed_date = datetime.today()
-
-                    inv_month_name = get_arabic_month(parsed_date.month)
-                    inv_year = parsed_date.year
-
-                    data = build_workbook(
-                        MAIN_TEMPLATE,
-                        f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -",
-                        main_items,
-                        date_format="yyyy-mm-dd",
-                    )
-                    files.append({
-                        "label": "ملف العهدة الأساسي",
-                        "file_name": f"تفريغ_عهدة_{dar_name}_2026.xlsx",
-                        "data": data,
-                    })
-                except Exception as e:
-                    st.error(f"حدث خطأ أثناء معالجة ملف الإكسل: {e}")
-            else:
-                st.error(
-                    f"لم يتم العثور على ملف النموذج المعتمد: `{MAIN_TEMPLATE}` في مجلد"
-                    " التطبيق!"
-                )
-
-        # --- الملفات المستقلة (الصيانة وغيرها) ---
-        for cat, items in sep_groups.items():
-            cfg = SEPARATE_FILES[cat]
-            if not os.path.exists(cfg["template"]):
-                st.error(
-                    f"لم يتم العثور على نموذج {cat}: `{cfg['template']}` في مجلد"
-                    " التطبيق!"
-                )
-                continue
+        if os.path.exists(excel_path):
             try:
-                title = cfg["title"].format(
-                    dar=dar_name, period=period_labels[cat].strip()
+                wb = openpyxl.load_workbook(excel_path)
+                ws = wb.active
+
+                first_inv_date_str = invoices_data[0]["inv_date"].strip()
+                try:
+                    parsed_date = datetime.strptime(first_inv_date_str, "%Y-%m-%d")
+                except Exception:
+                    st.warning(
+                        "⚠️ تاريخ الفاتورة الأولى غير صالح (الصيغة المطلوبة"
+                        " YYYY-MM-DD)، تم استخدام تاريخ اليوم في عنوان التفريغ."
+                    )
+                    parsed_date = datetime.today()
+
+                inv_month_name = get_arabic_month(parsed_date.month)
+                inv_year = parsed_date.year
+
+                ws["A2"] = (
+                    f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
                 )
-                data = build_workbook(cfg["template"], title, items)
-                files.append({
-                    "label": f"ملف {cat}",
-                    "file_name": cfg["file_name"].format(dar=safe_filename(dar_name)),
-                    "data": data,
-                })
+
+                start_row = 6
+
+                cat_col_map = {
+                    "الهاتف والبريد": "I",
+                    "الكهرباء": "J",
+                    "المياة": "K",
+                    "الصيانة": "O",
+                    "قرطاسيات ومطبوعات": "P",
+                    "نظافة": "R",
+                    "أخرى": "W",
+                }
+
+                for idx, item in enumerate(invoices_data):
+                    current_row = start_row + idx
+
+                    ws[f"C{current_row}"] = item["statement"]
+                    ws[f"D{current_row}"] = item["account_no"]
+
+                    raw_inv = str(item["inv_no"]).strip()
+                    ws[f"E{current_row}"] = (
+                        int(raw_inv) if raw_inv.isdigit() else raw_inv
+                    )
+
+                    # حفظ التاريخ كتاريخ حقيقي في الإكسل (وليس نص)
+                    try:
+                        inv_dt = datetime.strptime(item["inv_date"].strip(), "%Y-%m-%d")
+                        ws[f"F{current_row}"] = inv_dt
+                        ws[f"F{current_row}"].number_format = "yyyy-mm-dd"
+                    except Exception:
+                        ws[f"F{current_row}"] = item["inv_date"]
+
+                    ws[f"G{current_row}"] = item["tax_no"]
+                    ws[f"G{current_row}"].number_format = "@"
+                    ws[f"H{current_row}"] = item["supplier"]
+
+                    col_letter = cat_col_map.get(item["category"], "J")
+                    ws[f"{col_letter}{current_row}"] = float(item["amount"])
+
+                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
+                wb.save(output_filename)
+
+                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
+
+                with open(output_filename, "rb") as f:
+                    st.download_button(
+                        label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
+                        data=f,
+                        file_name=output_filename,
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        ),
+                    )
+
+                st.link_button(
+                    "🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف",
+                    "https://fanar.gqb.org.sa/requests/home",
+                )
             except Exception as e:
-                st.error(f"حدث خطأ أثناء معالجة ملف {cat}: {e}")
-
-        if files:
-            st.session_state["fanar_result"] = {
-                "fingerprint": fingerprint,
-                "dar": dar_name,
-                "files": files,
-            }
+                st.error(f"حدث خطأ أثناء معالجة ملف الإكسل: {e}")
         else:
-            st.session_state.pop("fanar_result", None)
-
-    # عرض النتيجة (خارج شرط الزر حتى ما تختفي أزرار التحميل بعد أول تحميل)
-    result = st.session_state.get("fanar_result")
-    if result and result["fingerprint"] == fingerprint:
-        st.success(f"🎉 تم تفريغ البيانات لـ ({result['dar']}) بنجاح!")
-
-        for i, out in enumerate(result["files"]):
-            st.download_button(
-                label=f"📥 تحميل {out['label']}",
-                data=out["data"],
-                file_name=out["file_name"],
-                mime=XLSX_MIME,
-                key=f"dl_{i}",
+            st.error(
+                f"لم يتم العثور على ملف النموذج المعتمد: `{excel_path}` في مجلد"
+                " التطبيق!"
             )
-
-        if len(result["files"]) > 1:
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for out in result["files"]:
-                    zf.writestr(out["file_name"], out["data"])
-            st.download_button(
-                label="📦 تحميل كل الملفات (ZIP)",
-                data=zip_buf.getvalue(),
-                file_name=f"تفريغ_عهدة_{safe_filename(result['dar'])}.zip",
-                mime="application/zip",
-                key="dl_zip",
-            )
-
-        st.link_button(
-            "🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف",
-            "https://fanar.gqb.org.sa/requests/home",
-        )
