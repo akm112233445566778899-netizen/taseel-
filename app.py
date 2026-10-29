@@ -1,5 +1,6 @@
 import os
 import re
+from io import BytesIO
 from datetime import datetime
 
 import openpyxl
@@ -89,17 +90,6 @@ def to_float(s):
 # استخراج التاريخ
 # ----------------------------------------------------------------------
 def extract_invoice_date(full_text):
-    """
-    يستخرج تاريخ الفاتورة بدون الاعتماد على الكلمات العربية
-    (لأن خط الـ PDF أحياناً يطلع حروف مشوهة).
-
-    الفاتورة فيها 4 تواريخ:
-      بداية الفترة < نهاية الفترة <= تاريخ الفاتورة < تاريخ بداية الاستحقاق
-    فتاريخ الفاتورة هو ثاني أكبر تاريخ.
-    يرجع نص بصيغة YYYY-MM-DD أو "" إذا ما لقى.
-    """
-    # الطريقة الأولى (الأدق): تاريخ الفاتورة يكون في نفس سطر رقم الحساب،
-    # أما تاريخ الاستحقاق فيكون في سطر مستقل تحته، فلا يُؤخذ أبداً.
     for line in full_text.split("\n"):
         if re.search(r"(?<!\d)30\d{9}(?!\d)", line):
             line_dates = []
@@ -115,19 +105,16 @@ def extract_invoice_date(full_text):
             if len(line_dates) == 1:
                 return line_dates[0].strftime("%Y-%m-%d")
 
-    # الطريقة الاحتياطية: ثاني أكبر تاريخ في الفاتورة
     found = set()
 
-    # DD-MM-YYYY أو DD/MM/YYYY
     for d, m, y in re.findall(r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", full_text):
         try:
             dt = datetime(int(y), int(m), int(d))
-            if 2000 <= dt.year <= 2100:  # يستبعد التواريخ الهجرية
+            if 2000 <= dt.year <= 2100:
                 found.add(dt)
         except ValueError:
             pass
 
-    # YYYY-MM-DD أو YYYY/MM/DD
     for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)", full_text):
         try:
             dt = datetime(int(y), int(m), int(d))
@@ -148,12 +135,6 @@ def extract_invoice_date(full_text):
 # استخراج المبلغ
 # ----------------------------------------------------------------------
 def extract_net_amount(full_text):
-    """
-    يبحث عن ثلاثية متطابقة حسابياً:
-      صافي + ضريبة (15%) = إجمالي
-    ويأخذ أكبر صافي يحقق الشرط (وهو إجمالي الفاتورة، مو بنود الجدول).
-    كمية الاستهلاك (ك.و.س) ما تحقق المعادلة فتتجاهل تلقائياً.
-    """
     amt_re = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)"
     nums = set()
     for x in re.findall(amt_re, full_text):
@@ -204,25 +185,19 @@ def parse_pdf_invoice_robust(uploaded_file):
         data["raw_text"] = full_text_raw
         full_text = convert_arabic_digits(full_text_raw)
 
-        # 1. رقم الفاتورة (12 رقم يبدأ بـ 20 أو 25)
         m = re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", full_text)
         if m:
             data["inv_no"] = m.group(1)
 
-        # 2. رقم الحساب (11 رقم يبدأ بـ 30)
         m = re.search(r"(?<!\d)(30\d{9})(?!\d)", full_text)
         if m:
             data["account_no"] = m.group(1)
 
-        # 3. الرقم الضريبي للمورد (15 رقم يبدأ بـ 3000)
         m = re.search(r"(?<!\d)(3000\d{11})(?!\d)", full_text)
         if m:
             data["tax_no"] = m.group(1)
 
-        # 4. تاريخ الفاتورة
         data["inv_date"] = extract_invoice_date(full_text)
-
-        # 5. المبلغ بدون ضريبة
         data["amount"] = extract_net_amount(full_text)
 
     except Exception as e:
@@ -337,7 +312,7 @@ if uploaded_files:
 
             statement = st.text_input(
                 f"البيان #{idx+1}",
-                value=f"سداد فاتورة كهرباء - {dar_name}",
+                value=f"سداد فاتورة - {dar_name}",
                 key=f"st_{idx}_{dar_name}",
             )
 
@@ -378,33 +353,12 @@ if uploaded_files:
 
     st.subheader("3️⃣ المعالجة والإرسال")
 
-    if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
+    if st.button("🚀 تفريغ العهدة وتوزيع البنود إلى ملفات Excel"):
         excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
 
         if os.path.exists(excel_path):
             try:
-                wb = openpyxl.load_workbook(excel_path)
-                ws = wb.active
-
-                first_inv_date_str = invoices_data[0]["inv_date"].strip()
-                try:
-                    parsed_date = datetime.strptime(first_inv_date_str, "%Y-%m-%d")
-                except Exception:
-                    st.warning(
-                        "⚠️ تاريخ الفاتورة الأولى غير صالح (الصيغة المطلوبة"
-                        " YYYY-MM-DD)، تم استخدام تاريخ اليوم في عنوان التفريغ."
-                    )
-                    parsed_date = datetime.today()
-
-                inv_month_name = get_arabic_month(parsed_date.month)
-                inv_year = parsed_date.year
-
-                ws["A2"] = (
-                    f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
-                )
-
-                start_row = 6
-
+                # خريطة الأعمدة لكل بند
                 cat_col_map = {
                     "الهاتف والبريد": "I",
                     "الكهرباء": "J",
@@ -415,47 +369,81 @@ if uploaded_files:
                     "أخرى": "W",
                 }
 
-                for idx, item in enumerate(invoices_data):
-                    current_row = start_row + idx
+                # تجميع الفواتير حسب البند (Category)
+                grouped_invoices = {}
+                for item in invoices_data:
+                    cat = item["category"]
+                    if cat not in grouped_invoices:
+                        grouped_invoices[cat] = []
+                    grouped_invoices[cat].append(item)
 
-                    ws[f"C{current_row}"] = item["statement"]
-                    ws[f"D{current_row}"] = item["account_no"]
+                st.success(f"🎉 تم تقسيم الفواتير بنجاح إلى ({len(grouped_invoices)}) بند/ملف!")
 
-                    raw_inv = str(item["inv_no"]).strip()
-                    ws[f"E{current_row}"] = (
-                        int(raw_inv) if raw_inv.isdigit() else raw_inv
+                # معالجة وحفظ ملف إكسل خاص لكل بند
+                for cat_name, items in grouped_invoices.items():
+                    wb = openpyxl.load_workbook(excel_path)
+                    ws = wb.active
+
+                    # الحصول على تاريخ أول فاتورة للبند الحالي لتسمية العنوان
+                    first_inv_date_str = items[0]["inv_date"].strip()
+                    try:
+                        parsed_date = datetime.strptime(first_inv_date_str, "%Y-%m-%d")
+                    except Exception:
+                        parsed_date = datetime.today()
+
+                    inv_month_name = get_arabic_month(parsed_date.month)
+                    inv_year = parsed_date.year
+
+                    # تحديث العنوان الخلية A2
+                    ws["A2"] = (
+                        f"تفريغ عهدة : {dar_name} - بند ({cat_name}) شهر {inv_month_name} {inv_year} م -"
                     )
 
-                    # حفظ التاريخ كتاريخ حقيقي في الإكسل (وليس نص)
-                    try:
-                        inv_dt = datetime.strptime(item["inv_date"].strip(), "%Y-%m-%d")
-                        ws[f"F{current_row}"] = inv_dt
-                        ws[f"F{current_row}"].number_format = "yyyy-mm-dd"
-                    except Exception:
-                        ws[f"F{current_row}"] = item["inv_date"]
+                    start_row = 6
 
-                    ws[f"G{current_row}"] = item["tax_no"]
-                    ws[f"G{current_row}"].number_format = "@"
-                    ws[f"H{current_row}"] = item["supplier"]
+                    for idx, item in enumerate(items):
+                        current_row = start_row + idx
 
-                    col_letter = cat_col_map.get(item["category"], "J")
-                    ws[f"{col_letter}{current_row}"] = float(item["amount"])
+                        ws[f"C{current_row}"] = item["statement"]
+                        ws[f"D{current_row}"] = item["account_no"]
 
-                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
-                wb.save(output_filename)
+                        raw_inv = str(item["inv_no"]).strip()
+                        ws[f"E{current_row}"] = (
+                            int(raw_inv) if raw_inv.isdigit() else raw_inv
+                        )
 
-                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
+                        try:
+                            inv_dt = datetime.strptime(item["inv_date"].strip(), "%Y-%m-%d")
+                            ws[f"F{current_row}"] = inv_dt
+                            ws[f"F{current_row}"].number_format = "yyyy-mm-dd"
+                        except Exception:
+                            ws[f"F{current_row}"] = item["inv_date"]
 
-                with open(output_filename, "rb") as f:
+                        ws[f"G{current_row}"] = item["tax_no"]
+                        ws[f"G{current_row}"].number_format = "@"
+                        ws[f"H{current_row}"] = item["supplier"]
+
+                        col_letter = cat_col_map.get(cat_name, "J")
+                        ws[f"{col_letter}{current_row}"] = float(item["amount"])
+
+                    # حفظ الملف في الذاكرة لتيسير التحميل السريع
+                    output_stream = BytesIO()
+                    wb.save(output_stream)
+                    output_stream.seek(0)
+
+                    output_filename = f"تفريغ_عهدة_{dar_name}_{cat_name}_2026.xlsx"
+
                     st.download_button(
-                        label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
-                        data=f,
+                        label=f"📥 تحميل ملف إكسل بند: [{cat_name}] ({len(items)} فاتورة)",
+                        data=output_stream,
                         file_name=output_filename,
                         mime=(
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         ),
+                        key=f"dl_{cat_name}",
                     )
 
+                st.divider()
                 st.link_button(
                     "🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف",
                     "https://fanar.gqb.org.sa/requests/home",
@@ -464,6 +452,5 @@ if uploaded_files:
                 st.error(f"حدث خطأ أثناء معالجة ملف الإكسل: {e}")
         else:
             st.error(
-                f"لم يتم العثور على ملف النموذج المعتمد: `{excel_path}` في مجلد"
-                " التطبيق!"
+                f"لم يتم العثور على ملف النموذج المعتمد: `{excel_path}` في مجلد التطبيق!"
             )
