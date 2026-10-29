@@ -1,7 +1,7 @@
 import os
 import re
-from io import BytesIO
 from datetime import datetime
+from io import BytesIO
 
 import openpyxl
 import pdfplumber
@@ -87,35 +87,27 @@ def to_float(s):
 
 
 # ----------------------------------------------------------------------
-# استخراج التاريخ
+# استخراج التاريخ (معدّل لدعم التواريخ قصيرة الخانات مثل 9/20/2026)
 # ----------------------------------------------------------------------
 def extract_invoice_date(full_text):
-    for line in full_text.split("\n"):
-        if re.search(r"(?<!\d)30\d{9}(?!\d)", line):
-            line_dates = []
-            for d, m, y in re.findall(
-                r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", line
-            ):
-                try:
-                    dt = datetime(int(y), int(m), int(d))
-                    if 2000 <= dt.year <= 2100:
-                        line_dates.append(dt)
-                except ValueError:
-                    pass
-            if len(line_dates) == 1:
-                return line_dates[0].strftime("%Y-%m-%d")
-
     found = set()
 
-    for d, m, y in re.findall(r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", full_text):
+    # 1. البحث عن صيغة DD-MM-YYYY أو M/D/YYYY
+    for d, m, y in re.findall(r"(?<!\d)(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?!\d)", full_text):
         try:
             dt = datetime(int(y), int(m), int(d))
             if 2000 <= dt.year <= 2100:
                 found.add(dt)
         except ValueError:
-            pass
+            try:
+                dt = datetime(int(y), int(d), int(m))
+                if 2000 <= dt.year <= 2100:
+                    found.add(dt)
+            except ValueError:
+                pass
 
-    for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)", full_text):
+    # 2. البحث عن صيغة YYYY-MM-DD
+    for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)", full_text):
         try:
             dt = datetime(int(y), int(m), int(d))
             if 2000 <= dt.year <= 2100:
@@ -126,9 +118,7 @@ def extract_invoice_date(full_text):
     dates = sorted(found)
     if not dates:
         return ""
-    if len(dates) == 1:
-        return dates[0].strftime("%Y-%m-%d")
-    return dates[-2].strftime("%Y-%m-%d")
+    return dates[-1].strftime("%Y-%m-%d")
 
 
 # ----------------------------------------------------------------------
@@ -157,7 +147,7 @@ def extract_net_amount(full_text):
 
 
 # ----------------------------------------------------------------------
-# تحليل الفاتورة
+# تحليل الفاتورة (شامل لشركة الكهرباء والموردين الآخرين كبردية)
 # ----------------------------------------------------------------------
 def parse_pdf_invoice_robust(uploaded_file):
     data = {
@@ -165,7 +155,7 @@ def parse_pdf_invoice_robust(uploaded_file):
         "account_no": "",
         "inv_date": "",
         "amount": 0.0,
-        "tax_no": "300000361310003",
+        "tax_no": "",
         "supplier": "الشركة السعودية للكهرباء",
         "raw_text": "",
         "error": "",
@@ -185,20 +175,38 @@ def parse_pdf_invoice_robust(uploaded_file):
         data["raw_text"] = full_text_raw
         full_text = convert_arabic_digits(full_text_raw)
 
-        m = re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", full_text)
-        if m:
-            data["inv_no"] = m.group(1)
+        # 1. استخراج اسم المورد
+        if "بردية" in full_text_raw or "Brdiah" in full_text_raw:
+            data["supplier"] = "مؤسسة بردية"
+        elif "الكهرباء" in full_text_raw:
+            data["supplier"] = "الشركة السعودية للكهرباء"
 
-        m = re.search(r"(?<!\d)(30\d{9})(?!\d)", full_text)
-        if m:
-            data["account_no"] = m.group(1)
+        # 2. رقم الفاتورة (دعم فواتير الصيانة والمبيعات وفواتير الكهرباء)
+        m_inv = re.search(r"فاتورة المبيعات\s*\n?\s*(\d+)", full_text_raw) or re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", full_text)
+        if m_inv:
+            data["inv_no"] = m_inv.group(1)
 
-        m = re.search(r"(?<!\d)(3000\d{11})(?!\d)", full_text)
-        if m:
-            data["tax_no"] = m.group(1)
+        # 3. رقم الحساب (خاص بالكهرباء والمياه)
+        m_acc = re.search(r"(?<!\d)(30\d{9})(?!\d)", full_text)
+        if m_acc:
+            data["account_no"] = m_acc.group(1)
 
+        # 4. الرقم الضريبي للمورد (15 رقم يبدأ بـ 3)
+        m_tax = re.search(r"(?<!\d)(3\d{14})(?!\d)", full_text)
+        if m_tax:
+            data["tax_no"] = m_tax.group(1)
+        else:
+            data["tax_no"] = "300000361310003" if "الكهرباء" in data["supplier"] else ""
+
+        # 5. تاريخ الفاتورة
         data["inv_date"] = extract_invoice_date(full_text)
-        data["amount"] = extract_net_amount(full_text)
+
+        # 6. المبلغ بدون ضريبة (يبحث عن إجمالي قبل الضريبة أولاً ثم المعادلات الحسابية)
+        m_amt = re.search(r"اجمالي قبل الضريبة\s*[\n|:]*\s*(\d+\.\d{2})", full_text)
+        if m_amt:
+            data["amount"] = float(m_amt.group(1))
+        else:
+            data["amount"] = extract_net_amount(full_text)
 
     except Exception as e:
         data["error"] = f"تعذر قراءة الملف: {e}"
@@ -278,7 +286,7 @@ if uploaded_files:
         with col1:
             supplier = st.text_input(
                 f"اسم المورد #{idx+1}",
-                value=ext_data.get("supplier", "الشركة السعودية للكهرباء"),
+                value=ext_data.get("supplier", ""),
                 key=f"sup_{idx}",
             )
             inv_no = st.text_input(
@@ -300,7 +308,7 @@ if uploaded_files:
         with col2:
             tax_no = st.text_input(
                 f"الرقم الضريبي #{idx+1}",
-                value=str(ext_data.get("tax_no", "300000361310003")),
+                value=str(ext_data.get("tax_no", "")),
                 key=f"tax_{idx}",
             )
             amount = st.number_input(
@@ -310,11 +318,8 @@ if uploaded_files:
                 key=f"amt_{idx}",
             )
 
-            statement = st.text_input(
-                f"البيان #{idx+1}",
-                value=f"سداد فاتورة - {dar_name}",
-                key=f"st_{idx}_{dar_name}",
-            )
+            # اختيار البند الافتراضي ذكياً بناءً على نوع الفاتورة
+            default_cat_index = 3 if "بردية" in supplier else 0  # الصيانة كافتراضي لبردية، والكهرباء لغيرها
 
             category = st.selectbox(
                 f"بند الحساب #{idx+1}",
@@ -327,7 +332,14 @@ if uploaded_files:
                     "نظافة",
                     "أخرى",
                 ],
+                index=default_cat_index,
                 key=f"cat_{idx}",
+            )
+
+            statement = st.text_input(
+                f"البيان #{idx+1}",
+                value=f"سداد فاتورة {category} - {dar_name}",
+                key=f"st_{idx}_{dar_name}_{category}",
             )
 
             estimated_total = round(amount + round(amount * VAT_RATE, 2), 2)
@@ -358,7 +370,6 @@ if uploaded_files:
 
         if os.path.exists(excel_path):
             try:
-                # خريطة الأعمدة لكل بند
                 cat_col_map = {
                     "الهاتف والبريد": "I",
                     "الكهرباء": "J",
@@ -369,7 +380,7 @@ if uploaded_files:
                     "أخرى": "W",
                 }
 
-                # تجميع الفواتير حسب البند (Category)
+                # تجميع الفواتير حسب البند
                 grouped_invoices = {}
                 for item in invoices_data:
                     cat = item["category"]
@@ -379,12 +390,10 @@ if uploaded_files:
 
                 st.success(f"🎉 تم تقسيم الفواتير بنجاح إلى ({len(grouped_invoices)}) بند/ملف!")
 
-                # معالجة وحفظ ملف إكسل خاص لكل بند
                 for cat_name, items in grouped_invoices.items():
                     wb = openpyxl.load_workbook(excel_path)
                     ws = wb.active
 
-                    # الحصول على تاريخ أول فاتورة للبند الحالي لتسمية العنوان
                     first_inv_date_str = items[0]["inv_date"].strip()
                     try:
                         parsed_date = datetime.strptime(first_inv_date_str, "%Y-%m-%d")
@@ -394,7 +403,6 @@ if uploaded_files:
                     inv_month_name = get_arabic_month(parsed_date.month)
                     inv_year = parsed_date.year
 
-                    # تحديث العنوان الخلية A2
                     ws["A2"] = (
                         f"تفريغ عهدة : {dar_name} - بند ({cat_name}) شهر {inv_month_name} {inv_year} م -"
                     )
@@ -426,7 +434,6 @@ if uploaded_files:
                         col_letter = cat_col_map.get(cat_name, "J")
                         ws[f"{col_letter}{current_row}"] = float(item["amount"])
 
-                    # حفظ الملف في الذاكرة لتيسير التحميل السريع
                     output_stream = BytesIO()
                     wb.save(output_stream)
                     output_stream.seek(0)
