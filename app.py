@@ -10,93 +10,80 @@ import urllib.request
 import urllib.error
 
 st.set_page_config(
-    page_title="نظام تسهيل | تفريغ العهود 2026",
+    page_title="نظام تسهيل | 2026",
     page_icon="⚡",
     layout="centered"
 )
 
-# --- عرض الشعار واسم البرنامج "تسهيل" ---
 if os.path.exists("logo.png"):
-    col_logo, col_title = st.columns([1, 3.5])
-    with col_logo:
+    c1, c2 = st.columns([1, 3.5])
+    with c1:
         st.image("logo.png", width=120)
-    with col_title:
+    with c2:
         st.title("⚡ نظام تسهيل")
-        st.subheader("أداة تفريغ العهود وإصدار أمر الصرف")
-        st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - الإدارة العامة 2026")
+        st.subheader("تفريغ العهود وأوامر الصرف")
+        st.caption("تحفيظ القرآن ببريدة - 2026")
 else:
     st.title("⚡ نظام تسهيل")
-    st.subheader("أداة تفريغ العهود وإصدار أمر الصرف")
-    st.caption("الجمعية الخيرية لتحفيظ القرآن ببريدة - الإدارة العامة 2026")
+    st.subheader("تفريغ العهود وأوامر الصرف")
+    st.caption("تحفيظ القرآن ببريدة - 2026")
 
 st.divider()
 
-# تهيئة ذاكرة الجلسة لمنع إعادة القراءة والتعليق
 if "parsed_cache" not in st.session_state:
     st.session_state.parsed_cache = {}
 
 API_KEY = st.secrets.get("GEMINI_API_KEY", "").strip()
 
 def tafqeet_arabic(amount):
-    """تحويل المبلغ تلقائياً إلى كلمات عربية (تفقيط)"""
     try:
         if amount <= 0:
             return ""
         riyal = int(amount)
         halalas = int(round((amount - riyal) * 100))
-        text = f"{riyal} ريال سعودي"
+        t = f"{riyal} ريال سعودي"
         if halalas > 0:
-            text += f" و {halalas} هللة"
-        return text + " فقط لا غير"
+            t += f" و {halalas} هللة"
+        return t + " فقط لا غير"
     except Exception:
         return ""
 
-def get_arabic_month(month_num):
+def get_arabic_month(m):
     months = {
-        1: "يناير", 2: "فبراير", 3: "مارس", 4: "أبريل",
-        5: "مايو", 6: "يونيو", 7: "يوليو", 8: "أغسطس",
-        9: "سبتمبر", 10: "أكتوبر", 11: "نوفمبر", 12: "ديسمبر"
+        1: "يناير", 2: "فبراير", 3: "مارس",
+        4: "أبريل", 5: "مايو", 6: "يونيو",
+        7: "يوليو", 8: "أغسطس", 9: "سبتمبر",
+        10: "أكتوبر", 11: "نوفمبر", 12: "ديسمبر"
     }
-    return months.get(month_num, "")
+    return months.get(m, "")
 
 def get_file_hash(file_bytes):
     return hashlib.md5(file_bytes).hexdigest()
 
 def extract_any_invoice(file_bytes, mime_type):
-    """قراءة ذكية لأي فاتورة في السوق (PDF أو صورة) تدعم جميع صيغ مفاتيح Gemini"""
     if not API_KEY:
-        return {"error": "مفتاح GEMINI_API_KEY غير مضاف في Secrets"}
+        return {"error": "مفتاح GEMINI_API_KEY غير مضاف"}
 
     try:
         b64_data = base64.b64encode(file_bytes).decode("utf-8")
 
-        prompt = """
-        أنت محاسب سعودي خبير. افحص الفاتورة المرفقة (سواء كانت فاتورة كهرباء، مياه، محل تجاري، سباكة، قرطاسية، أو أي مؤسسة) واستخرج البيانات بدقة 100%:
+        prompt = (
+            "أنت محاسب سعودي. استخرج من الفاتورة بصيغة JSON فقط:\n"
+            "1. supplier: اسم المورد أو المحل.\n"
+            "2. tax_no: الرقم الضريبي (15 رقم) أو فارغ.\n"
+            "3. inv_no: رقم الفاتورة.\n"
+            "4. account_no: رقم الحساب إن وجد أو فارغ.\n"
+            "5. inv_date: تاريخ الفاتورة YYYY-MM-DD.\n"
+            "6. amount_pre_tax: المبلغ قبل الضريبة (اقسم الإجمالي على 1.15 إذا كان شامل الضريبة).\n"
+            "7. category: اختر من [الكهرباء, المياة, الهاتف والبريد, الصيانة, قرطاسيات ومطبوعات, نظافة, أخرى].\n"
+            "8. description: وصف مختصر للفاتورة.\n"
+            '{"supplier":"","tax_no":"","inv_no":"","account_no":"",'
+            '"inv_date":"YYYY-MM-DD","amount_pre_tax":0.0,'
+            '"category":"أخرى","description":""}'
+        )
 
-        1. supplier: اسم المحل أو الشركة الموردة كما هو مكتوب في أعلى الفاتورة أو الختم (مثال: الشركة السعودية للكهرباء، مكتبة جرير، مؤسسة كذا...).
-        2. tax_no: الرقم الضريبي للمورد المكون من 15 رقم (يبدأ وينتهي بـ 3 غالباً). إذا لم يوجد اتركه فارغاً "".
-        3. inv_no: رقم الفاتورة (Invoice Number / Bill No). في فواتير الكهرباء يكون 12 رقم يبدأ بـ 20 أو 25. في فواتير المحلات هو رقم الفاتورة الضريبية.
-        4. account_no: رقم الحساب أو رقم المشترك أو رقم العميل إن وجد (في الكهرباء 11 رقم يبدأ بـ 30)، وإلا اتركه فارغاً "".
-        5. inv_date: تاريخ إصدار الفاتورة أو تاريخ بداية الاستحقاق بصيغة YYYY-MM-DD (تجنب تاريخ بداية/نهاية فترة الاستهلاك في الكهرباء).
-        6. amount_pre_tax: المبلغ الإجمالي قبل الضريبة (المبلغ الخاضع للضريبة / غير شامل الضريبة) كرقم عشري. ملاحظة هامة: إذا كانت الفاتورة تعرض المبلغ الإجمالي شامل الضريبة (15%) فقط ولا تذكر المبلغ قبل الضريبة، فاقسم الإجمالي على 1.15 وقرّبه لأقرب منزلتين عشريتين.
-        7. category: اختر أنسب بند من هذه القائمة حصراً بناءً على نشاط المحل أو محتوى الفاتورة:
-           ["الكهرباء", "المياة", "الهاتف والبريد", "الصيانة", "قرطاسيات ومطبوعات", "نظافة", "أخرى"]
-        8. description: وصف مختصر جداً لمحتوى الفاتورة (مثال: فاتورة كهرباء، أدوات سباكة وصيانة، منظفات، أوراق وقرطاسية).
-
-        أعد النتيجة بصيغة JSON صالحة فقط بدون أي نص إضافي:
-        {
-            "supplier": "",
-            "tax_no": "",
-            "inv_no": "",
-            "account_no": "",
-            "inv_date": "YYYY-MM-DD",
-            "amount_pre_tax": 0.0,
-            "category": "أخرى",
-            "description": ""
-        }
-        """
-
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        base_url = "https://generativelanguage.googleapis.com/v1beta/models/"
+        url = base_url + "gemini-2.5-flash:generateContent"
         headers = {"Content-Type": "application/json"}
 
         if API_KEY.startswith("AIza"):
@@ -117,151 +104,131 @@ def extract_any_invoice(file_bytes, mime_type):
             }
         }
 
+        data_bytes = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST"
+            url, data=data_bytes, headers=headers, method="POST"
         )
         with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            text_out = result["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(text_out)
+            res = json.loads(resp.read().decode("utf-8"))
+            txt = res["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(txt)
 
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
-        return {"error": f"خطأ من خادم Google ({e.code}): {err_body}"}
+        return {"error": f"خطأ Google ({e.code}): {err_body}"}
     except Exception as e:
         return {"error": str(e)}
 
-# --- القسم الأول: رفع الفواتير ---
-st.subheader("1️⃣ رفع الفواتير (أي فاتورة PDF أو صورة)")
+st.subheader("1️⃣ رفع الفواتير (PDF أو صورة)")
 uploaded_files = st.file_uploader(
-    "ارفع فواتير الكهرباء أو فواتير المحلات والمشتريات (حتى 5 فواتير معاً)",
+    "ارفع الفواتير (حتى 5 فواتير معاً)",
     type=["pdf", "png", "jpg", "jpeg", "webp"],
     accept_multiple_files=True
 )
 
 if uploaded_files:
     if len(uploaded_files) > 5:
-        st.warning("⚠️ تم تحديد أكثر من 5 فواتير. سيتم معالجة أول 5 فواتير فقط.")
+        st.warning("⚠️ سيتم معالجة أول 5 فواتير فقط.")
         uploaded_files = uploaded_files[:5]
 
     if not API_KEY:
-        st.error("⚠️ تنبيه: مفتاح GEMINI_API_KEY غير موجود في إعدادات Secrets في Streamlit.")
+        st.error("⚠️ مفتاح GEMINI_API_KEY غير موجود في Secrets.")
 
     st.divider()
-    st.subheader("2️⃣ مراجعة وتحديد البيانات")
+    st.subheader("2️⃣ مراجعة البيانات")
 
     dar_list = [
-        "إدارة الدور النسائية",
-        "دار حصة",
-        "دار التقوى",
-        "دار الصفا",
-        "دار لمياء بنت الخياط",
-        "دار منيرة المانع",
-        "دار الفتاة",
-        "دار الفايزية",
-        "دار الهدى",
-        "دار الضياء",
-        "دار زينب",
-        "دار العليا",
-        "دار الخنساء",
-        "التاليات",
-        "خولة بنت حكيم",
-        "غراس",
-        "سيدة بنيجات",
-        "الأفق",
-        "الوقار",
-        "دار الطرفية"
+        "إدارة الدور النسائية", "دار حصة", "دار التقوى",
+        "دار الصفا", "دار لمياء بنت الخياط", "دار منيرة المانع",
+        "دار الفتاة", "دار الفايزية", "دار الهدى",
+        "دار الضياء", "دار زينب", "دار العليا",
+        "دار الخنساء", "التاليات", "خولة بنت حكيم",
+        "غراس", "سيدة بنيجات", "الأفق",
+        "الوقار", "دار الطرفية"
     ]
 
-    dar_name = st.selectbox("اختر اسم الدار المعنية", dar_list)
+    dar_name = st.selectbox("اختر اسم الدار", dar_list)
     categories_list = [
-        "الكهرباء",
-        "المياة",
-        "الهاتف والبريد",
-        "الصيانة",
-        "قرطاسيات ومطبوعات",
-        "نظافة",
-        "أخرى"
+        "الكهرباء", "المياة", "الهاتف والبريد",
+        "الصيانة", "قرطاسيات ومطبوعات", "نظافة", "أخرى"
     ]
 
     invoices_data = []
 
     for idx, file in enumerate(uploaded_files):
-        file_bytes = file.getvalue()
-        f_hash = get_file_hash(file_bytes)
+        f_bytes = file.getvalue()
+        f_hash = get_file_hash(f_bytes)
 
-        # القراءة مرة واحدة فقط وحفظها في الذاكرة لمنع التعليق
         if f_hash not in st.session_state.parsed_cache:
-            with st.spinner(f"🔍 جاري قراءة الفاتورة #{idx + 1} ({file.name})..."):
-                mime_type = file.type or "application/pdf"
-                st.session_state.parsed_cache[f_hash] = extract_any_invoice(file_bytes, mime_type)
+            with st.spinner(f"🔍 جاري قراءة الفاتورة #{idx + 1}..."):
+                m_type = file.type or "application/pdf"
+                st.session_state.parsed_cache[f_hash] = extract_any_invoice(
+                    f_bytes, m_type
+                )
 
-        ext_data = st.session_state.parsed_cache[f_hash]
+        ext = st.session_state.parsed_cache[f_hash]
 
-        st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
-        if "error" in ext_data:
-            st.warning(f"تعذرت القراءة التلقائية: {ext_data['error']} (يمكنك الإدخال يدوياً)")
+        st.markdown(f"### 📄 الفاتورة ({idx + 1}): `{file.name}`")
+        if "error" in ext:
+            st.warning(f"تعذرت القراءة: {ext['error']}")
 
-        detected_cat = ext_data.get("category", "أخرى")
-        default_cat_index = categories_list.index(detected_cat) if detected_cat in categories_list else 6
-        default_desc = ext_data.get("description", "سداد فاتورة")
-        default_supplier = ext_data.get("supplier", "")
+        d_cat = ext.get("category", "أخرى")
+        cat_idx = categories_list.index(d_cat) if d_cat in categories_list else 6
+        d_desc = ext.get("description", "سداد فاتورة")
+        d_sup = ext.get("supplier", "")
 
         col1, col2 = st.columns(2)
         with col1:
             supplier = st.text_input(
-                f"اسم المورد / المحل #{idx+1}",
-                value=str(default_supplier),
+                f"اسم المورد #{idx+1}",
+                value=str(d_sup),
                 key=f"sup_{f_hash}_{idx}"
             )
             inv_no = st.text_input(
                 f"رقم الفاتورة #{idx+1}",
-                value=str(ext_data.get("inv_no", "")),
+                value=str(ext.get("inv_no", "")),
                 key=f"inv_{f_hash}_{idx}"
             )
             account_no = st.text_input(
-                f"رقم الحساب / المرجع #{idx+1}",
-                value=str(ext_data.get("account_no", "")),
+                f"رقم الحساب #{idx+1}",
+                value=str(ext.get("account_no", "")),
                 key=f"acc_{f_hash}_{idx}"
             )
             inv_date = st.text_input(
                 f"تاريخ الفاتورة #{idx+1}",
-                value=str(ext_data.get("inv_date", "")),
+                value=str(ext.get("inv_date", "")),
                 key=f"date_{f_hash}_{idx}"
             )
 
         with col2:
             tax_no = st.text_input(
                 f"الرقم الضريبي #{idx+1}",
-                value=str(ext_data.get("tax_no", "")),
+                value=str(ext.get("tax_no", "")),
                 key=f"tax_{f_hash}_{idx}"
             )
             amount = st.number_input(
                 f"المبلغ بدون الضريبة #{idx+1}",
-                value=float(ext_data.get("amount_pre_tax", 0.0) or 0.0),
+                value=float(ext.get("amount_pre_tax", 0.0) or 0.0),
                 step=0.01,
                 key=f"amt_{f_hash}_{idx}"
             )
             statement = st.text_input(
                 f"البيان #{idx+1}",
-                value=f"{default_desc} - {dar_name}",
+                value=f"{d_desc} - {dar_name}",
                 key=f"st_{f_hash}_{idx}"
             )
             category = st.selectbox(
                 f"بند الحساب #{idx+1}",
                 categories_list,
-                index=default_cat_index,
+                index=cat_idx,
                 key=f"cat_{f_hash}_{idx}"
             )
 
-            estimated_total = amount * 1.15
-            written_amount = tafqeet_arabic(estimated_total)
-            written_text = st.text_input(
-                f"المبلغ كتابةً (تفقيط) #{idx+1}",
-                value=written_amount,
+            est_total = amount * 1.15
+            w_amount = tafqeet_arabic(est_total)
+            w_text = st.text_input(
+                f"التفقيط #{idx+1}",
+                value=w_amount,
                 key=f"writ_{f_hash}_{idx}"
             )
 
@@ -274,7 +241,7 @@ if uploaded_files:
             "tax_no": tax_no,
             "statement": statement,
             "category": category,
-            "written_amount": written_text
+            "written_amount": w_text
         })
         st.markdown("---")
 
@@ -288,13 +255,70 @@ if uploaded_files:
                 wb = openpyxl.load_workbook(excel_path)
                 ws = wb.active
 
-                first_inv_date_str = invoices_data[0]["inv_date"]
+                first_dt = invoices_data[0]["inv_date"]
                 try:
-                    parsed_date = datetime.strptime(first_inv_date_str, '%Y-%m-%d')
+                    p_dt = datetime.strptime(first_dt, "%Y-%m-%d")
                 except Exception:
-                    parsed_date = datetime.today()
+                    p_dt = datetime.today()
 
-                inv_month_name = get_arabic_month(parsed_date.month)
-                inv_year = parsed_date.year
+                m_name = get_arabic_month(p_dt.month)
+                yr = p_dt.year
 
-                ws['
+                ws["A2"] = f"تفريغ عهدة : {dar_name} شهر {m_name} {yr} م -"
+
+                start_row = 6
+                cat_col_map = {
+                    "الهاتف والبريد": "I",
+                    "الكهرباء": "J",
+                    "المياة": "K",
+                    "الصيانة": "O",
+                    "قرطاسيات ومطبوعات": "P",
+                    "نظافة": "R",
+                    "أخرى": "W"
+                }
+
+                for idx, item in enumerate(invoices_data):
+                    r = start_row + idx
+                    ws[f"C{r}"] = item["statement"]
+                    ws[f"D{r}"] = item["account_no"]
+
+                    raw_inv = str(item["inv_no"]).strip()
+                    ws[f"E{r}"] = int(raw_inv) if raw_inv.isdigit() else raw_inv
+
+                    ws[f"F{r}"] = item["inv_date"]
+                    ws[f"G{r}"] = item["tax_no"]
+                    ws[f"G{r}"].number_format = "@"
+                    ws[f"H{r}"] = item["supplier"]
+
+                    col_l = cat_col_map.get(item["category"], "W")
+                    ws[f"{col_l}{r}"] = item["amount"]
+
+                out_buf = io.BytesIO()
+                wb.save(out_buf)
+                wb.close()
+                out_buf.seek(0)
+
+                out_name = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
+                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
+
+                st.download_button(
+                    label="📥 تحميل ملف Excel المفرغ",
+                    data=out_buf,
+                    file_name=out_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+                st.link_button(
+                    "🌐 الذهاب إلى منصة فنار",
+                    "https://fanar.gqb.org.sa/requests/home"
+                )
+
+            except Exception as e:
+                st.error(f"حدث خطأ: {e}")
+        else:
+            st.error(f"⚠️ الملف غير موجود: {excel_path}")
+
+if st.session_state.parsed_cache:
+    if st.sidebar.button("🧹 مسح ذاكرة الفواتير"):
+        st.session_state.parsed_cache.clear()
+        st.rerun()
