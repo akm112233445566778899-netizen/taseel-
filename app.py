@@ -5,8 +5,9 @@ import os
 import io
 import json
 import hashlib
-from google import genai
-from google.genai import types
+import base64
+import urllib.request
+import urllib.error
 
 st.set_page_config(
     page_title="نظام تسهيل | تفريغ العهود 2026",
@@ -34,7 +35,7 @@ st.divider()
 if "parsed_cache" not in st.session_state:
     st.session_state.parsed_cache = {}
 
-API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+API_KEY = st.secrets.get("GEMINI_API_KEY", "").strip()
 
 def tafqeet_arabic(amount):
     """تحويل المبلغ تلقائياً إلى كلمات عربية (تفقيط)"""
@@ -62,12 +63,12 @@ def get_file_hash(file_bytes):
     return hashlib.md5(file_bytes).hexdigest()
 
 def extract_any_invoice(file_bytes, mime_type):
-    """قراءة ذكية لأي فاتورة في السوق (PDF أو صورة) باستخدام Gemini 2.5 Flash"""
+    """قراءة ذكية لأي فاتورة في السوق (PDF أو صورة) تدعم جميع صيغ مفاتيح Gemini"""
     if not API_KEY:
         return {"error": "مفتاح GEMINI_API_KEY غير مضاف في Secrets"}
 
     try:
-        client = genai.Client(api_key=API_KEY)
+        b64_data = base64.b64encode(file_bytes).decode("utf-8")
 
         prompt = """
         أنت محاسب سعودي خبير. افحص الفاتورة المرفقة (سواء كانت فاتورة كهرباء، مياه، محل تجاري، سباكة، قرطاسية، أو أي مؤسسة) واستخرج البيانات بدقة 100%:
@@ -95,19 +96,41 @@ def extract_any_invoice(file_bytes, mime_type):
         }
         """
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-                prompt
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.0
-            )
-        )
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        headers = {"Content-Type": "application/json"}
 
-        return json.loads(response.text)
+        if API_KEY.startswith("AIza"):
+            url += f"?key={API_KEY}"
+        else:
+            headers["Authorization"] = f"Bearer {API_KEY}"
+
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"inline_data": {"mime_type": mime_type, "data": b64_data}},
+                    {"text": prompt}
+                ]
+            }],
+            "generationConfig": {
+                "response_mime_type": "application/json",
+                "temperature": 0.0
+            }
+        }
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            text_out = result["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(text_out)
+
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        return {"error": f"خطأ من خادم Google ({e.code}): {err_body}"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -274,63 +297,4 @@ if uploaded_files:
                 inv_month_name = get_arabic_month(parsed_date.month)
                 inv_year = parsed_date.year
 
-                ws['A2'] = f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
-
-                start_row = 6
-
-                cat_col_map = {
-                    "الهاتف والبريد": "I",
-                    "الكهرباء": "J",
-                    "المياة": "K",
-                    "الصيانة": "O",
-                    "قرطاسيات ومطبوعات": "P",
-                    "نظافة": "R",
-                    "أخرى": "W"
-                }
-
-                for idx, item in enumerate(invoices_data):
-                    current_row = start_row + idx
-
-                    ws[f'C{current_row}'] = item["statement"]
-                    ws[f'D{current_row}'] = item["account_no"]
-
-                    raw_inv = str(item["inv_no"]).strip()
-                    ws[f'E{current_row}'] = int(raw_inv) if raw_inv.isdigit() else raw_inv
-
-                    ws[f'F{current_row}'] = item["inv_date"]
-                    ws[f'G{current_row}'] = item["tax_no"]
-                    ws[f'G{current_row}'].number_format = '@'
-                    ws[f'H{current_row}'] = item["supplier"]
-
-                    col_letter = cat_col_map.get(item["category"], "W")
-                    ws[f'{col_letter}{current_row}'] = item["amount"]
-
-                # حفظ الملف في الذاكرة (RAM) وتفريغ الكائنات لمنع امتلاء السيرفر
-                output_buffer = io.BytesIO()
-                wb.save(output_buffer)
-                wb.close()
-                output_buffer.seek(0)
-
-                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
-
-                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
-
-                st.download_button(
-                    label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
-                    data=output_buffer,
-                    file_name=output_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-                st.link_button("🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف", "https://fanar.gqb.org.sa/requests/home")
-
-            except Exception as e:
-                st.error(f"حدث خطأ أثناء معالجة الملف: {e}")
-        else:
-            st.error(f"⚠️ لم يتم العثور على الملف ({excel_path}) داخل المستودع.")
-
-# زر لتنظيف الذاكرة عند الانتهاء من مجموعة كبيرة من الدور
-if st.session_state.parsed_cache:
-    if st.sidebar.button("🧹 مسح ذاكرة الفواتير السابقة"):
-        st.session_state.parsed_cache.clear()
-        st.rerun()
+                ws['
