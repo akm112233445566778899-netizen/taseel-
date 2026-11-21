@@ -34,6 +34,76 @@ st.divider()
 
 VAT_RATE = 0.15
 
+# ----------------------------------------------------------------------
+# أنواع الفواتير: لإضافة نوع جديد أضف سطر هنا فقط
+#   category : بند الحساب (لازم يكون من CATEGORIES)
+#   statement: نص البيان ({dar} يتبدل باسم الدار)
+#   supplier : اسم المورد الافتراضي
+#   tax_no   : الرقم الضريبي الافتراضي
+#   electric : True = يستخدم الاستخراج المخصص لفواتير الكهرباء
+# ----------------------------------------------------------------------
+CATEGORIES = [
+    "الكهرباء",
+    "المياة",
+    "الهاتف والبريد",
+    "الصيانة",
+    "قرطاسيات ومطبوعات",
+    "نظافة",
+    "أخرى",
+]
+
+INVOICE_TYPES = {
+    "فاتورة كهرباء": {
+        "category": "الكهرباء",
+        "statement": "سداد فاتورة كهرباء - {dar}",
+        "supplier": "الشركة السعودية للكهرباء",
+        "tax_no": "300000361310003",
+        "electric": True,
+    },
+    "فاتورة مياه": {
+        "category": "المياة",
+        "statement": "سداد فاتورة مياه - {dar}",
+        "supplier": "شركة المياه الوطنية",
+        "tax_no": "",
+        "electric": False,
+    },
+    "فاتورة هاتف / إنترنت": {
+        "category": "الهاتف والبريد",
+        "statement": "سداد فاتورة هاتف وإنترنت - {dar}",
+        "supplier": "",
+        "tax_no": "",
+        "electric": False,
+    },
+    "فاتورة صيانة": {
+        "category": "الصيانة",
+        "statement": "سداد فاتورة صيانة - {dar}",
+        "supplier": "",
+        "tax_no": "",
+        "electric": False,
+    },
+    "قرطاسيات ومطبوعات": {
+        "category": "قرطاسيات ومطبوعات",
+        "statement": "شراء قرطاسيات ومطبوعات - {dar}",
+        "supplier": "",
+        "tax_no": "",
+        "electric": False,
+    },
+    "فاتورة نظافة": {
+        "category": "نظافة",
+        "statement": "سداد فاتورة نظافة - {dar}",
+        "supplier": "",
+        "tax_no": "",
+        "electric": False,
+    },
+    "أخرى": {
+        "category": "أخرى",
+        "statement": "سداد فاتورة - {dar}",
+        "supplier": "",
+        "tax_no": "",
+        "electric": False,
+    },
+}
+
 
 # ----------------------------------------------------------------------
 # دوال مساعدة
@@ -85,12 +155,32 @@ def to_float(s):
     return float(convert_arabic_digits(s).replace(",", "").strip())
 
 
+def find_all_dates(full_text):
+    """كل التواريخ الميلادية الصالحة في النص، بترتيب ظهورها"""
+    result = []
+    for d, m, y in re.findall(r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", full_text):
+        try:
+            dt = datetime(int(y), int(m), int(d))
+            if 2000 <= dt.year <= 2100:
+                result.append(dt)
+        except ValueError:
+            pass
+    for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)", full_text):
+        try:
+            dt = datetime(int(y), int(m), int(d))
+            if 2000 <= dt.year <= 2100:
+                result.append(dt)
+        except ValueError:
+            pass
+    return result
+
+
 # ----------------------------------------------------------------------
-# استخراج التاريخ
+# استخراج التاريخ (كهرباء)
 # ----------------------------------------------------------------------
 def extract_invoice_date(full_text):
     """
-    يستخرج تاريخ الفاتورة بدون الاعتماد على الكلمات العربية
+    يستخرج تاريخ فاتورة الكهرباء بدون الاعتماد على الكلمات العربية
     (لأن خط الـ PDF أحياناً يطلع حروف مشوهة).
 
     الفاتورة فيها 4 تواريخ:
@@ -98,45 +188,15 @@ def extract_invoice_date(full_text):
     فتاريخ الفاتورة هو ثاني أكبر تاريخ.
     يرجع نص بصيغة YYYY-MM-DD أو "" إذا ما لقى.
     """
-    # الطريقة الأولى (الأدق): تاريخ الفاتورة يكون في نفس سطر رقم الحساب،
-    # أما تاريخ الاستحقاق فيكون في سطر مستقل تحته، فلا يُؤخذ أبداً.
+    # الطريقة الأولى (الأدق): تاريخ الفاتورة يكون في نفس سطر رقم الحساب
     for line in full_text.split("\n"):
         if re.search(r"(?<!\d)30\d{9}(?!\d)", line):
-            line_dates = []
-            for d, m, y in re.findall(
-                r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", line
-            ):
-                try:
-                    dt = datetime(int(y), int(m), int(d))
-                    if 2000 <= dt.year <= 2100:
-                        line_dates.append(dt)
-                except ValueError:
-                    pass
+            line_dates = find_all_dates(line)
             if len(line_dates) == 1:
                 return line_dates[0].strftime("%Y-%m-%d")
 
     # الطريقة الاحتياطية: ثاني أكبر تاريخ في الفاتورة
-    found = set()
-
-    # DD-MM-YYYY أو DD/MM/YYYY
-    for d, m, y in re.findall(r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", full_text):
-        try:
-            dt = datetime(int(y), int(m), int(d))
-            if 2000 <= dt.year <= 2100:  # يستبعد التواريخ الهجرية
-                found.add(dt)
-        except ValueError:
-            pass
-
-    # YYYY-MM-DD أو YYYY/MM/DD
-    for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)", full_text):
-        try:
-            dt = datetime(int(y), int(m), int(d))
-            if 2000 <= dt.year <= 2100:
-                found.add(dt)
-        except ValueError:
-            pass
-
-    dates = sorted(found)
+    dates = sorted(set(find_all_dates(full_text)))
     if not dates:
         return ""
     if len(dates) == 1:
@@ -152,7 +212,6 @@ def extract_net_amount(full_text):
     يبحث عن ثلاثية متطابقة حسابياً:
       صافي + ضريبة (15%) = إجمالي
     ويأخذ أكبر صافي يحقق الشرط (وهو إجمالي الفاتورة، مو بنود الجدول).
-    كمية الاستهلاك (ك.و.س) ما تحقق المعادلة فتتجاهل تلقائياً.
     """
     amt_re = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)"
     nums = set()
@@ -178,14 +237,15 @@ def extract_net_amount(full_text):
 # ----------------------------------------------------------------------
 # تحليل الفاتورة
 # ----------------------------------------------------------------------
-def parse_pdf_invoice_robust(uploaded_file):
+def parse_pdf_invoice_robust(uploaded_file, inv_type):
+    cfg = INVOICE_TYPES[inv_type]
     data = {
         "inv_no": "",
         "account_no": "",
         "inv_date": "",
         "amount": 0.0,
-        "tax_no": "300000361310003",
-        "supplier": "الشركة السعودية للكهرباء",
+        "tax_no": cfg["tax_no"],
+        "supplier": cfg["supplier"],
         "raw_text": "",
         "error": "",
     }
@@ -204,25 +264,33 @@ def parse_pdf_invoice_robust(uploaded_file):
         data["raw_text"] = full_text_raw
         full_text = convert_arabic_digits(full_text_raw)
 
-        # 1. رقم الفاتورة (12 رقم يبدأ بـ 20 أو 25)
-        m = re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", full_text)
-        if m:
-            data["inv_no"] = m.group(1)
+        if cfg["electric"]:
+            # فواتير الكهرباء: استخراج مخصص
+            m = re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", full_text)
+            if m:
+                data["inv_no"] = m.group(1)
 
-        # 2. رقم الحساب (11 رقم يبدأ بـ 30)
-        m = re.search(r"(?<!\d)(30\d{9})(?!\d)", full_text)
-        if m:
-            data["account_no"] = m.group(1)
+            m = re.search(r"(?<!\d)(30\d{9})(?!\d)", full_text)
+            if m:
+                data["account_no"] = m.group(1)
 
-        # 3. الرقم الضريبي للمورد (15 رقم يبدأ بـ 3000)
-        m = re.search(r"(?<!\d)(3000\d{11})(?!\d)", full_text)
-        if m:
-            data["tax_no"] = m.group(1)
+            m = re.search(r"(?<!\d)(3000\d{11})(?!\d)", full_text)
+            if m:
+                data["tax_no"] = m.group(1)
 
-        # 4. تاريخ الفاتورة
-        data["inv_date"] = extract_invoice_date(full_text)
+            data["inv_date"] = extract_invoice_date(full_text)
+        else:
+            # باقي الأنواع: استخراج عام
+            # الرقم الضريبي السعودي: 15 رقم يبدأ بـ 3
+            m = re.search(r"(?<!\d)(3\d{14})(?!\d)", full_text)
+            if m:
+                data["tax_no"] = m.group(1)
 
-        # 5. المبلغ بدون ضريبة
+            # أول تاريخ في الفاتورة (راجعه يدوياً)
+            dates = find_all_dates(full_text)
+            if dates:
+                data["inv_date"] = dates[0].strftime("%Y-%m-%d")
+
         data["amount"] = extract_net_amount(full_text)
 
     except Exception as e:
@@ -263,30 +331,35 @@ dar_list = [
 st.subheader("اختر الدار")
 dar_name = st.selectbox("اختر اسم الدار المعنية", dar_list)
 
-st.subheader("1️⃣ رفع الفواتير (حتى 5 فواتير)")
+st.subheader("1️⃣ رفع الفواتير")
 uploaded_files = st.file_uploader(
-    "التقط صور الفواتير أو اسحب ملفات الـ PDF هنا (حتى 5 فواتير معاً)",
+    "التقط صور الفواتير أو اسحب ملفات الـ PDF هنا",
     type=["pdf", "png", "jpg", "jpeg"],
     accept_multiple_files=True,
 )
 
 if uploaded_files:
-    if len(uploaded_files) > 5:
-        st.warning("⚠️ تم تحديد أكثر من 5 فواتير. سيتم معالجة أول 5 فواتير فقط.")
-        uploaded_files = uploaded_files[:5]
-
     st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
     st.divider()
 
     st.subheader("2️⃣ مراجعة وتحديد البيانات")
 
     invoices_data = []
+    type_names = list(INVOICE_TYPES.keys())
 
     for idx, file in enumerate(uploaded_files):
         st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
 
+        # نوع الفاتورة: يتحكم في البيان وبند الحساب والاستخراج
+        inv_type = st.selectbox(
+            f"نوع الفاتورة #{idx+1}",
+            type_names,
+            key=f"type_{idx}",
+        )
+        cfg = INVOICE_TYPES[inv_type]
+
         with st.spinner(f"🔍 جاري استخراج البيانات للفاتورة #{idx + 1}..."):
-            ext_data = parse_pdf_invoice_robust(file)
+            ext_data = parse_pdf_invoice_robust(file, inv_type)
 
         if ext_data.get("error"):
             st.warning(f"⚠️ {ext_data['error']}")
@@ -299,60 +372,54 @@ if uploaded_files:
         with st.expander(f"عرض النص المستخرج للفاتورة #{idx + 1} (للفحص)"):
             st.text(ext_data.get("raw_text", ""))
 
+        # المفاتيح تحتوي على نوع الفاتورة عشان القيم الافتراضية تتحدث عند تغيير النوع
         col1, col2 = st.columns(2)
         with col1:
             supplier = st.text_input(
                 f"اسم المورد #{idx+1}",
-                value=ext_data.get("supplier", "الشركة السعودية للكهرباء"),
-                key=f"sup_{idx}",
+                value=ext_data.get("supplier", ""),
+                key=f"sup_{idx}_{inv_type}",
             )
             inv_no = st.text_input(
                 f"رقم الفاتورة #{idx+1}",
                 value=str(ext_data.get("inv_no", "")),
-                key=f"inv_{idx}",
+                key=f"inv_{idx}_{inv_type}",
             )
             account_no = st.text_input(
                 f"رقم الحساب #{idx+1}",
                 value=str(ext_data.get("account_no", "")),
-                key=f"acc_{idx}",
+                key=f"acc_{idx}_{inv_type}",
             )
             inv_date = st.text_input(
                 f"تاريخ الفاتورة #{idx+1} (YYYY-MM-DD)",
                 value=str(ext_data.get("inv_date", "")),
-                key=f"date_{idx}",
+                key=f"date_{idx}_{inv_type}",
             )
 
         with col2:
             tax_no = st.text_input(
                 f"الرقم الضريبي #{idx+1}",
-                value=str(ext_data.get("tax_no", "300000361310003")),
-                key=f"tax_{idx}",
+                value=str(ext_data.get("tax_no", "")),
+                key=f"tax_{idx}_{inv_type}",
             )
             amount = st.number_input(
                 f"المبلغ بدون الضريبة #{idx+1}",
                 value=float(ext_data.get("amount", 0.0) or 0.0),
                 step=0.01,
-                key=f"amt_{idx}",
+                key=f"amt_{idx}_{inv_type}",
             )
 
             statement = st.text_input(
                 f"البيان #{idx+1}",
-                value=f"سداد فاتورة كهرباء - {dar_name}",
-                key=f"st_{idx}_{dar_name}",
+                value=cfg["statement"].format(dar=dar_name),
+                key=f"st_{idx}_{dar_name}_{inv_type}",
             )
 
             category = st.selectbox(
                 f"بند الحساب #{idx+1}",
-                [
-                    "الكهرباء",
-                    "المياة",
-                    "الهاتف والبريد",
-                    "الصيانة",
-                    "قرطاسيات ومطبوعات",
-                    "نظافة",
-                    "أخرى",
-                ],
-                key=f"cat_{idx}",
+                CATEGORIES,
+                index=CATEGORIES.index(cfg["category"]),
+                key=f"cat_{idx}_{inv_type}",
             )
 
             estimated_total = round(amount + round(amount * VAT_RATE, 2), 2)
