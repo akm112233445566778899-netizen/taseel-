@@ -367,6 +367,22 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
                 data["tax_no"] = m.group(1)
 
             data["inv_date"] = extract_invoice_date(full_text)
+
+            # لو ما لقى شي (نص تالف أو الفاتورة مو كهرباء) نجرب القراءة من الصورة
+            if not data["inv_date"] and not extract_net_amount(full_text):
+                ocr = ocr_text(uploaded_file)
+                if ocr.strip():
+                    g = generic_extract(ocr)
+                    data["raw_text"] = (
+                        "--- نص OCR ---\n" + ocr + "\n--- نص PDF ---\n" + full_text_raw
+                    )
+                    data["inv_no"] = g["inv_no"] or data["inv_no"]
+                    data["inv_date"] = g["inv_date"]
+                    data["tax_no"] = g["tax_no"]
+                    data["supplier"] = g["supplier"]
+                    data["amount"] = g["amount"]
+                    data["note"] = g["note"]
+                    return data
         else:
             # باقي الأنواع: نقرأ الصورة بالـ OCR إذا متوفر (أدق من نص PDF التالف)
             ocr = ocr_text(uploaded_file)
@@ -389,6 +405,28 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
         data["error"] = f"تعذر قراءة الملف: {e}"
 
     return data
+
+
+def detect_type_free(uploaded_file):
+    """بدون ذكاء اصطناعي: يميّز فاتورة الكهرباء من نمط أرقامها، وغيرها يرجع "أخرى" """
+    key = f"dt_{uploaded_file.name}_{uploaded_file.size}"
+    if key not in st.session_state:
+        t = "أخرى"
+        try:
+            uploaded_file.seek(0)
+            if uploaded_file.name.lower().endswith(".pdf"):
+                with pdfplumber.open(uploaded_file) as pdf:
+                    txt = convert_arabic_digits(
+                        "\n".join((pg.extract_text() or "") for pg in pdf.pages[:2])
+                    )
+                if re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", txt) and re.search(
+                    r"(?<!\d)30\d{9}(?!\d)", txt
+                ):
+                    t = "فاتورة كهرباء"
+        except Exception:
+            pass
+        st.session_state[key] = t
+    return st.session_state[key]
 
 
 # ----------------------------------------------------------------------
@@ -516,7 +554,7 @@ if uploaded_files:
         # النوع يُقترح تلقائياً من الذكاء الاصطناعي وتقدر تغيره
         detected = ai.get("type") if ai_ok else None
         if detected not in INVOICE_TYPES:
-            detected = "فاتورة كهرباء" if not ai_ok else "أخرى"
+            detected = detect_type_free(file) if not ai_ok else "أخرى"
 
         inv_type = st.selectbox(
             f"نوع الفاتورة #{idx+1}",
