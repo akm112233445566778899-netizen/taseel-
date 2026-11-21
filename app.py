@@ -158,23 +158,46 @@ def to_float(s):
     return float(convert_arabic_digits(s).replace(",", "").strip())
 
 
+MONTH_NAMES = {
+    "يناير": 1, "فبراير": 2, "مارس": 3, "أبريل": 4, "ابريل": 4, "مايو": 5,
+    "يونيو": 6, "يوليو": 7, "أغسطس": 8, "اغسطس": 8, "سبتمبر": 9,
+    "أكتوبر": 10, "اكتوبر": 10, "نوفمبر": 11, "ديسمبر": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
 def find_all_dates(full_text):
     """كل التواريخ الميلادية الصالحة في النص، بترتيب ظهورها"""
     result = []
-    for d, m, y in re.findall(r"(?<!\d)(\d{2})[-/](\d{2})[-/](\d{4})(?!\d)", full_text):
+
+    def add(y, m, d):
         try:
             dt = datetime(int(y), int(m), int(d))
             if 2000 <= dt.year <= 2100:
                 result.append(dt)
         except ValueError:
             pass
-    for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)", full_text):
-        try:
-            dt = datetime(int(y), int(m), int(d))
-            if 2000 <= dt.year <= 2100:
-                result.append(dt)
-        except ValueError:
-            pass
+
+    # DD-MM-YYYY أو DD/MM/YYYY أو DD.MM.YYYY
+    for d, m, y in re.findall(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?!\d)", full_text):
+        add(y, m, d)
+    # YYYY-MM-DD أو YYYY/MM/DD أو YYYY.MM.DD
+    for y, m, d in re.findall(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)", full_text):
+        add(y, m, d)
+    # 24 أكتوبر 2026 / 24-Oct-2026
+    names = "|".join(sorted(MONTH_NAMES, key=len, reverse=True))
+    for d, name, y in re.findall(
+        rf"(?<!\d)(\d{{1,2}})\s*[-/ ]?\s*({names})\w*\.?\s*[-/,]?\s*(\d{{4}})(?!\d)",
+        full_text, re.I,
+    ):
+        add(y, MONTH_NAMES[name.lower()], d)
+    # Oct 24, 2026
+    for name, d, y in re.findall(
+        rf"(?<![\w])({names})\w*\.?\s*(\d{{1,2}}),?\s*(\d{{4}})(?!\d)",
+        full_text, re.I,
+    ):
+        add(y, MONTH_NAMES[name.lower()], d)
     return result
 
 
@@ -320,10 +343,17 @@ def generic_extract(text, text_layer="", header=""):
             res["amount"] = round(max(vals) / (1 + VAT_RATE), 2)
             res["note"] = "تم حساب المبلغ قبل الضريبة من الإجمالي (÷1.15)، تأكد منه."
 
-    # التاريخ: أول تاريخ ميلادي (من النص كله ثم من أعلى الصفحة)
-    dates = find_all_dates(text) or find_all_dates(convert_arabic_digits(header))
-    if dates:
-        res["inv_date"] = dates[0].strftime("%Y-%m-%d")
+    # مصادر النص بالترتيب: OCR، أعلى الصفحة، نص الـ PDF معكوس، نص الـ PDF
+    rev_layer = "\n".join(ln[::-1] for ln in (text_layer or "").split("\n"))
+    srcs = [text, convert_arabic_digits(header), convert_arabic_digits(rev_layer),
+            convert_arabic_digits(text_layer or "")]
+
+    # التاريخ: أول مصدر فيه تاريخ ميلادي
+    for src in srcs:
+        dates = find_all_dates(src)
+        if dates:
+            res["inv_date"] = dates[0].strftime("%Y-%m-%d")
+            break
 
     # الرقم الضريبي للمورد (نستبعد رقم الجمعية)
     for t in re.findall(r"(?<!\d)(3\d{14})(?!\d)", text):
@@ -331,15 +361,28 @@ def generic_extract(text, text_layer="", header=""):
             res["tax_no"] = t
             break
 
-    # رقم الفاتورة
-    m = re.search(r"Invoice\s*(?:Number|No\.?)\D{0,15}(\d{3,15})", text, re.I)
-    if m:
-        res["inv_no"] = m.group(1)
-    elif header:
+    # رقم الفاتورة: الأدق أولاً (OCR ثم أعلى الصفحة)، وبعدها نص الـ PDF (قد يكون تالف)
+    inv_patterns = [
+        r"Invoice\s*(?:Number|No\.?|#)\D{0,15}(\d{3,15})",
+        r"(?:رقم\s*الفاتورة|فاتورة\s*رقم|رقم\s*الفاتوره)\D{0,15}(\d{3,15})",
+    ]
+
+    def find_inv(sources):
+        for src in sources:
+            for pat in inv_patterns:
+                m = re.search(pat, src, re.I)
+                if m:
+                    return m.group(1)
+        return ""
+
+    res["inv_no"] = find_inv(srcs[:2])
+    if not res["inv_no"] and header:
         # سطر لوحده فيه أرقام فقط (6-10 خانات) في أعلى الصفحة
         m = re.search(r"^\s*(\d{6,10})\s*$", convert_arabic_digits(header), re.M)
         if m:
             res["inv_no"] = m.group(1)
+    if not res["inv_no"]:
+        res["inv_no"] = find_inv(srcs[2:])
 
     # اسم المورد: من نص OCR، وإذا ما لقى من نص الـ PDF بعد عكس السطور
     # (بعض الفواتير تخزّن العربي معكوس)
