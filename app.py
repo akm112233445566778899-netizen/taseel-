@@ -1,5 +1,6 @@
 import base64
 import io
+import zlib
 import json
 import os
 import re
@@ -170,6 +171,7 @@ MONTH_NAMES = {
 def find_all_dates(full_text):
     """كل التواريخ الميلادية الصالحة في النص، بترتيب ظهورها"""
     result = []
+    full_text = re.sub(r"(?<=\d)\s*/\s*(?=\d)", "/", full_text)
 
     def add(y, m, d):
         try:
@@ -322,31 +324,62 @@ def ocr_header(uploaded_file):
         return ""
 
 
+BIZ_KEYS = r"(?:مؤسسة|شركة|مصنع|مكتب|مركز|معرض|ورشة|مطبعة|مكتبة|محلات|محل|للتجارة|للمقاولات|لحلول)"
+NOT_SUPPLIER = ("الجمعية", "جمعية", "الدور", "العميل", "فاتورة", "ضريبية", "تقرير", "الضمان", "الملاحظات")
+CUR = r"(?:\bSAR\b|\bSR\b|ر\.\s?س|ريال)"
+
+
 def generic_extract(text, text_layer="", header=""):
     """استخراج عام من أي نص فاتورة. القيم الناقصة تبقى فاضية"""
     text = convert_arabic_digits(text)
+    layer = convert_arabic_digits(text_layer or "")
     res = {"inv_no": "", "inv_date": "", "tax_no": "", "supplier": "",
-           "amount": 0.0, "note": ""}
-
-    # المبلغ: الأفضل ثلاثية صافي + 15% = إجمالي
-    res["amount"] = extract_net_amount(text)
-    if not res["amount"]:
-        # احتياطي: أكبر مبلغ غالباً هو الإجمالي بعد الضريبة
-        amt_re = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)"
-        vals = []
-        for x in re.findall(amt_re, text):
-            try:
-                vals.append(to_float(x))
-            except ValueError:
-                pass
-        if vals:
-            res["amount"] = round(max(vals) / (1 + VAT_RATE), 2)
-            res["note"] = "تم حساب المبلغ قبل الضريبة من الإجمالي (÷1.15)، تأكد منه."
+           "amount": 0.0, "note": "", "vat_free": False}
 
     # مصادر النص بالترتيب: OCR، أعلى الصفحة، نص الـ PDF معكوس، نص الـ PDF
-    rev_layer = "\n".join(ln[::-1] for ln in (text_layer or "").split("\n"))
-    srcs = [text, convert_arabic_digits(header), convert_arabic_digits(rev_layer),
-            convert_arabic_digits(text_layer or "")]
+    # (عكس السطر يقلب الأرقام أيضاً، فنرجّع كل رقم لوضعه الصحيح)
+    rev_layer = "\n".join(
+        re.sub(r"[0-9][0-9./:\-]*", lambda m: m.group(0)[::-1], ln[::-1])
+        for ln in (text_layer or "").split("\n")
+    )
+    srcs = [text, convert_arabic_digits(header), convert_arabic_digits(rev_layer), layer]
+
+    # الرقم الضريبي للمورد (نستبعد رقم الجمعية)
+    for t in re.findall(r"(?<!\d)(3\d{14})(?!\d)", text):
+        if t != BUYER_TAX:
+            res["tax_no"] = t
+            break
+
+    # المبلغ قبل الضريبة
+    # 1) ثلاثية متطابقة: صافي + 15% = إجمالي
+    amount = extract_net_amount(text) or extract_net_amount(layer)
+    if not amount:
+        # 2) مبالغ مكتوبة بجانب عملة (SAR 110 / 110 ريال / ر.س)، بدون اشتراط كسور
+        cur_vals = []
+        for src in (text, layer):
+            for a, b in re.findall(rf"{CUR}\s*:?\s*(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s*{CUR}", src, re.I):
+                try:
+                    cur_vals.append(to_float(a or b))
+                except ValueError:
+                    pass
+        # 3) أكبر مبلغ بكسور
+        dec_vals = []
+        amt_re = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)"
+        for x in re.findall(amt_re, text):
+            try:
+                dec_vals.append(to_float(x))
+            except ValueError:
+                pass
+        total = max(cur_vals) if cur_vals else (max(dec_vals) if dec_vals else 0.0)
+        if total:
+            if res["tax_no"]:
+                amount = round(total / (1 + VAT_RATE), 2)
+                res["note"] = "تم حساب المبلغ قبل الضريبة من الإجمالي (÷1.15)، تأكد منه."
+            else:
+                amount = total
+                res["vat_free"] = True
+                res["note"] = "الفاتورة بدون رقم ضريبي: اعتُمد الإجمالي كمبلغ بدون ضريبة، تأكد منه."
+    res["amount"] = amount
 
     # التاريخ: أول مصدر فيه تاريخ ميلادي
     for src in srcs:
@@ -355,16 +388,10 @@ def generic_extract(text, text_layer="", header=""):
             res["inv_date"] = dates[0].strftime("%Y-%m-%d")
             break
 
-    # الرقم الضريبي للمورد (نستبعد رقم الجمعية)
-    for t in re.findall(r"(?<!\d)(3\d{14})(?!\d)", text):
-        if t != BUYER_TAX:
-            res["tax_no"] = t
-            break
-
     # رقم الفاتورة: الأدق أولاً (OCR ثم أعلى الصفحة)، وبعدها نص الـ PDF (قد يكون تالف)
     inv_patterns = [
         r"Invoice\s*(?:Number|No\.?|#)\D{0,15}(\d{3,15})",
-        r"(?:رقم\s*الفاتورة|فاتورة\s*رقم|رقم\s*الفاتوره)\D{0,15}(\d{3,15})",
+        r"(?:رقم\s*الفاتورة|فاتورة\s*رقم|رقم\s*الفاتوره)\D{0,15}(\d{1,15})",
     ]
 
     def find_inv(sources):
@@ -377,24 +404,40 @@ def generic_extract(text, text_layer="", header=""):
 
     res["inv_no"] = find_inv(srcs[:2])
     if not res["inv_no"] and header:
-        # سطر لوحده فيه أرقام فقط (6-10 خانات) في أعلى الصفحة
         m = re.search(r"^\s*(\d{6,10})\s*$", convert_arabic_digits(header), re.M)
         if m:
             res["inv_no"] = m.group(1)
     if not res["inv_no"]:
         res["inv_no"] = find_inv(srcs[2:])
 
-    # اسم المورد: من نص OCR، وإذا ما لقى من نص الـ PDF بعد عكس السطور
-    # (بعض الفواتير تخزّن العربي معكوس)
-    sources = text.split("\n") + [ln[::-1] for ln in (text_layer or "").split("\n")]
-    for line in sources:
-        m = re.search(r"(?:مؤسسة|شركة|مصنع|مكتب|مركز)[^\n\d|:]{3,50}", line)
-        if not m:
+    # اسم المورد
+    def clean_name(n):
+        return re.sub(r"\s*الاسم\s*", " ", n).strip()
+
+    def ok_name(n):
+        return len(n) > 6 and not any(w in n for w in NOT_SUPPLIER)
+
+    lines = text.split("\n") + (text_layer or "").split("\n") + [ln[::-1] for ln in (text_layer or "").split("\n")]
+    # أ) سطر فيه كلمة نشاط (مؤسسة/شركة/لحلول...): نأخذ السطر كامل إذا قصير ونظيف
+    for line in lines:
+        mk = re.search(BIZ_KEYS, line)
+        if not mk:
             continue
-        name = re.sub(r"\s*الاسم\s*", " ", m.group(0)).strip()
-        if "الجمعية" not in name and "الدور" not in name and len(name) > 6:
-            res["supplier"] = name
+        if len(line.split()) <= 8 and not re.search(r"[\d:|]", line):
+            cand = clean_name(line)
+        else:
+            sl = re.search(BIZ_KEYS + r"[^\n\d|:]{3,50}", line)
+            cand = clean_name(sl.group(0)) if sl else ""
+        if cand and ok_name(cand):
+            res["supplier"] = cand
             break
+    # ب) احتياطي: أول سطر عربي نظيف في أعلى نص الـ PDF (غالباً اسم المنشأة)
+    if not res["supplier"]:
+        for line in (text_layer or "").split("\n")[:4]:
+            ln = line.strip()
+            if re.fullmatch(r"[\u0600-\u06FF\s]+", ln) and 2 <= len(ln.split()) <= 8 and ok_name(ln):
+                res["supplier"] = ln
+                break
 
     return res
 
@@ -459,6 +502,7 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
                     data["supplier"] = g["supplier"]
                     data["amount"] = g["amount"]
                     data["note"] = g["note"]
+                    data["vat_free"] = g["vat_free"]
                     return data
         else:
             # باقي الأنواع: نقرأ الصورة بالـ OCR إذا متوفر (أدق من نص PDF التالف)
@@ -478,6 +522,7 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
             data["supplier"] = g["supplier"] or cfg["supplier"]
             data["amount"] = g["amount"]
             data["note"] = g["note"]
+            data["vat_free"] = g["vat_free"]
             return data
 
         data["amount"] = extract_net_amount(full_text)
@@ -677,6 +722,7 @@ if uploaded_files:
 
     for idx, file in enumerate(uploaded_files):
         st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
+        fk = f"{idx}_{file.size}_{zlib.crc32(file.name.encode('utf-8'))}"
 
         with st.spinner(f"🔍 جاري قراءة الفاتورة #{idx + 1}..."):
             ai = get_ai_data(file)
@@ -737,56 +783,62 @@ if uploaded_files:
             supplier = st.text_input(
                 f"اسم المورد #{idx+1}",
                 value=ext_data.get("supplier", ""),
-                key=f"sup_{idx}_{inv_type}",
+                key=f"sup_{fk}_{inv_type}",
             )
             inv_no = st.text_input(
                 f"رقم الفاتورة #{idx+1}",
                 value=str(ext_data.get("inv_no", "")),
-                key=f"inv_{idx}_{inv_type}",
+                key=f"inv_{fk}_{inv_type}",
             )
             account_no = st.text_input(
                 f"رقم الحساب #{idx+1}",
                 value=str(ext_data.get("account_no", "")),
-                key=f"acc_{idx}_{inv_type}",
+                key=f"acc_{fk}_{inv_type}",
             )
             inv_date = st.text_input(
                 f"تاريخ الفاتورة #{idx+1} (YYYY-MM-DD)",
                 value=str(ext_data.get("inv_date", "")),
-                key=f"date_{idx}_{inv_type}",
+                key=f"date_{fk}_{inv_type}",
             )
 
         with col2:
             tax_no = st.text_input(
                 f"الرقم الضريبي #{idx+1}",
                 value=str(ext_data.get("tax_no", "")),
-                key=f"tax_{idx}_{inv_type}",
+                key=f"tax_{fk}_{inv_type}",
             )
             amount = st.number_input(
                 f"المبلغ بدون الضريبة #{idx+1}",
                 value=float(ext_data.get("amount", 0.0) or 0.0),
                 step=0.01,
-                key=f"amt_{idx}_{inv_type}",
+                key=f"amt_{fk}_{inv_type}",
             )
 
             statement = st.text_input(
                 f"البيان #{idx+1}",
                 value=cfg["statement"].format(dar=dar_name),
-                key=f"st_{idx}_{dar_name}_{inv_type}",
+                key=f"st_{fk}_{dar_name}_{inv_type}",
             )
 
             category = st.selectbox(
                 f"بند الحساب #{idx+1}",
                 CATEGORIES,
                 index=CATEGORIES.index(cfg["category"]),
-                key=f"cat_{idx}_{inv_type}",
+                key=f"cat_{fk}_{inv_type}",
             )
 
-            estimated_total = round(amount + round(amount * VAT_RATE, 2), 2)
+            vat_free = st.checkbox(
+                f"الفاتورة بدون ضريبة #{idx+1}",
+                value=bool(ext_data.get("vat_free", False)),
+                key=f"vf_{fk}_{inv_type}",
+            )
+            vat_part = 0.0 if vat_free else round(amount * VAT_RATE, 2)
+            estimated_total = round(amount + vat_part, 2)
             written_amount = tafqeet_arabic(estimated_total)
             written_text = st.text_input(
                 f"المبلغ كتابةً (تفقيط) #{idx+1}",
                 value=written_amount,
-                key=f"writ_{idx}_{amount}",
+                key=f"writ_{fk}_{amount}_{vat_free}",
             )
 
         invoices_data.append({
