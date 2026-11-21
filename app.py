@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import re
 from datetime import datetime
@@ -300,6 +302,73 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
 
 
 # ----------------------------------------------------------------------
+# القراءة بالذكاء الاصطناعي (تقرأ أي فاتورة: PDF أو صورة)
+# تحتاج مفتاح ANTHROPIC_API_KEY في Secrets، وإذا ما وُجد يرجع للاستخراج القديم
+# ----------------------------------------------------------------------
+AI_MODEL = "claude-sonnet-5-5"
+
+
+def ai_extract(uploaded_file):
+    try:
+        import anthropic
+
+        api_key = st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        return {"error": "no_key"}
+
+    try:
+        uploaded_file.seek(0)
+        raw = uploaded_file.read()
+        b64 = base64.standard_b64encode(raw).decode()
+        name = uploaded_file.name.lower()
+
+        if name.endswith(".pdf"):
+            block = {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
+            }
+        else:
+            media = "image/png" if name.endswith(".png") else "image/jpeg"
+            block = {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media, "data": b64},
+            }
+
+        types_list = " | ".join(INVOICE_TYPES.keys())
+        prompt = f"""اقرأ هذه الفاتورة (سعودية غالباً) وأرجع JSON فقط بدون أي شرح أو علامات ```.
+المفاتيح:
+- "supplier": اسم المورد/الشركة البائعة
+- "inv_no": رقم الفاتورة
+- "account_no": رقم الحساب أو العقد أو الاشتراك إن وُجد، وإلا ""
+- "inv_date": تاريخ الفاتورة الميلادي بصيغة YYYY-MM-DD (تجاهل التواريخ الهجرية وتواريخ الاستحقاق وفترة الاستهلاك)
+- "tax_no": الرقم الضريبي للمورد (15 رقم) إن وُجد، وإلا ""
+- "amount": المبلغ قبل ضريبة القيمة المضافة (رقم فقط)
+- "total": الإجمالي بعد الضريبة (رقم فقط)
+- "type": نوع الفاتورة، اختر واحداً بالضبط من: {types_list}
+حوّل الأرقام العربية (٠١٢٣) إلى إنجليزية. إذا لم تجد قيمة اتركها "" أو 0، ولا تخمّن."""
+
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=AI_MODEL,
+            max_tokens=1000,
+            messages=[{"role": "user", "content": [block, {"type": "text", "text": prompt}]}],
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        text = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    except Exception as e:
+        return {"error": f"تعذرت القراءة بالذكاء الاصطناعي: {e}"}
+
+
+def get_ai_data(uploaded_file):
+    """يحفظ النتيجة عشان ما تنعاد القراءة (وتنحسب تكلفتها) مع كل تحديث للصفحة"""
+    key = f"ai_{uploaded_file.name}_{uploaded_file.size}"
+    if key not in st.session_state:
+        st.session_state[key] = ai_extract(uploaded_file)
+    return st.session_state[key]
+
+
+# ----------------------------------------------------------------------
 # الواجهة
 # ----------------------------------------------------------------------
 dar_list = [
@@ -350,15 +419,44 @@ if uploaded_files:
     for idx, file in enumerate(uploaded_files):
         st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
 
-        # نوع الفاتورة: يتحكم في البيان وبند الحساب والاستخراج
+        with st.spinner(f"🔍 جاري قراءة الفاتورة #{idx + 1}..."):
+            ai = get_ai_data(file)
+        ai_ok = bool(ai) and not ai.get("error")
+
+        # النوع يُقترح تلقائياً من الذكاء الاصطناعي وتقدر تغيره
+        detected = ai.get("type") if ai_ok else None
+        if detected not in INVOICE_TYPES:
+            detected = "فاتورة كهرباء" if not ai_ok else "أخرى"
+
         inv_type = st.selectbox(
             f"نوع الفاتورة #{idx+1}",
             type_names,
-            key=f"type_{idx}",
+            index=type_names.index(detected),
+            key=f"type_{idx}_{file.name}",
         )
         cfg = INVOICE_TYPES[inv_type]
 
-        with st.spinner(f"🔍 جاري استخراج البيانات للفاتورة #{idx + 1}..."):
+        if ai_ok:
+            try:
+                amt = float(ai.get("amount") or 0)
+                tot = float(ai.get("total") or 0)
+            except (TypeError, ValueError):
+                amt, tot = 0.0, 0.0
+            ext_data = {
+                "supplier": ai.get("supplier") or cfg["supplier"],
+                "inv_no": ai.get("inv_no") or "",
+                "account_no": ai.get("account_no") or "",
+                "inv_date": ai.get("inv_date") or "",
+                "tax_no": ai.get("tax_no") or cfg["tax_no"],
+                "amount": amt,
+                "raw_text": json.dumps(ai, ensure_ascii=False, indent=2),
+                "error": "",
+            }
+            if amt and tot and abs(round(amt * (1 + VAT_RATE), 2) - tot) > 0.05:
+                st.warning("⚠️ المبلغ + الضريبة 15% لا يطابق الإجمالي في الفاتورة، راجع المبلغ.")
+        else:
+            if ai and ai.get("error") not in (None, "no_key"):
+                st.warning(f"⚠️ {ai['error']} (تم استخدام الاستخراج العادي)")
             ext_data = parse_pdf_invoice_robust(file, inv_type)
 
         if ext_data.get("error"):
