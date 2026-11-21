@@ -237,6 +237,92 @@ def extract_net_amount(full_text):
 
 
 # ----------------------------------------------------------------------
+# القراءة المجانية من الصورة (OCR) + استخراج عام
+# لفواتير الـ PDF اللي نصها تالف (أرقام معكوسة) أو الصور الممسوحة
+# ----------------------------------------------------------------------
+# الرقم الضريبي للجمعية (المشتري) لاستبعاده عند البحث عن رقم المورد
+BUYER_TAX = "310834779300003"
+
+
+def ocr_text(uploaded_file):
+    """يحوّل الصفحة لصورة ويقرأها بـ Tesseract. يرجع "" إذا الأداة غير متوفرة"""
+    try:
+        import pytesseract
+        from PIL import Image
+
+        uploaded_file.seek(0)
+        images = []
+        if uploaded_file.name.lower().endswith(".pdf"):
+            with pdfplumber.open(uploaded_file) as pdf:
+                for page in pdf.pages[:3]:
+                    images.append(page.to_image(resolution=300).original.convert("L"))
+        else:
+            images.append(Image.open(uploaded_file).convert("L"))
+
+        out = ""
+        for img in images:
+            for psm in (4, 3):  # وضعين يكملون بعض في الجداول
+                for lang in ("ara+eng", "eng"):
+                    try:
+                        out += pytesseract.image_to_string(
+                            img, lang=lang, config=f"--psm {psm}"
+                        ) + "\n"
+                        break
+                    except pytesseract.TesseractError:
+                        continue
+        return out
+    except Exception:
+        return ""
+
+
+def generic_extract(text):
+    """استخراج عام من أي نص فاتورة. القيم الناقصة تبقى فاضية"""
+    text = convert_arabic_digits(text)
+    res = {"inv_no": "", "inv_date": "", "tax_no": "", "supplier": "",
+           "amount": 0.0, "note": ""}
+
+    # المبلغ: الأفضل ثلاثية صافي + 15% = إجمالي
+    res["amount"] = extract_net_amount(text)
+    if not res["amount"]:
+        # احتياطي: أكبر مبلغ غالباً هو الإجمالي بعد الضريبة
+        amt_re = r"(?<![\d,.])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)"
+        vals = []
+        for x in re.findall(amt_re, text):
+            try:
+                vals.append(to_float(x))
+            except ValueError:
+                pass
+        if vals:
+            res["amount"] = round(max(vals) / (1 + VAT_RATE), 2)
+            res["note"] = "تم حساب المبلغ قبل الضريبة من الإجمالي (÷1.15)، تأكد منه."
+
+    # التاريخ: أول تاريخ ميلادي
+    dates = find_all_dates(text)
+    if dates:
+        res["inv_date"] = dates[0].strftime("%Y-%m-%d")
+
+    # الرقم الضريبي للمورد (نستبعد رقم الجمعية)
+    for t in re.findall(r"(?<!\d)(3\d{14})(?!\d)", text):
+        if t != BUYER_TAX:
+            res["tax_no"] = t
+            break
+
+    # رقم الفاتورة
+    m = re.search(r"Invoice\s*(?:Number|No\.?)\D{0,15}(\d{3,15})", text, re.I)
+    if m:
+        res["inv_no"] = m.group(1)
+
+    # اسم المورد
+    for m in re.finditer(r"(?:مؤسسة|شركة|مصنع|مكتب|مركز)[^\n\d|:]{3,50}", text):
+        name = m.group(0).strip()
+        if "الجمعية" not in name and "الدور" not in name:
+            res["supplier"] = name
+            break
+
+    return res
+
+
+# ----------------------------------------------------------------------
 # تحليل الفاتورة
 # ----------------------------------------------------------------------
 def parse_pdf_invoice_robust(uploaded_file, inv_type):
@@ -282,16 +368,20 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
 
             data["inv_date"] = extract_invoice_date(full_text)
         else:
-            # باقي الأنواع: استخراج عام
-            # الرقم الضريبي السعودي: 15 رقم يبدأ بـ 3
-            m = re.search(r"(?<!\d)(3\d{14})(?!\d)", full_text)
-            if m:
-                data["tax_no"] = m.group(1)
-
-            # أول تاريخ في الفاتورة (راجعه يدوياً)
-            dates = find_all_dates(full_text)
-            if dates:
-                data["inv_date"] = dates[0].strftime("%Y-%m-%d")
+            # باقي الأنواع: نقرأ الصورة بالـ OCR إذا متوفر (أدق من نص PDF التالف)
+            ocr = ocr_text(uploaded_file)
+            g = generic_extract(ocr if ocr.strip() else full_text)
+            data["raw_text"] = (
+                "--- نص OCR ---\n" + ocr + "\n--- نص PDF ---\n" + full_text_raw
+                if ocr.strip() else full_text_raw
+            )
+            data["inv_no"] = g["inv_no"]
+            data["inv_date"] = g["inv_date"]
+            data["tax_no"] = g["tax_no"] or cfg["tax_no"]
+            data["supplier"] = g["supplier"] or cfg["supplier"]
+            data["amount"] = g["amount"]
+            data["note"] = g["note"]
+            return data
 
         data["amount"] = extract_net_amount(full_text)
 
@@ -458,6 +548,8 @@ if uploaded_files:
             if ai and ai.get("error") not in (None, "no_key"):
                 st.warning(f"⚠️ {ai['error']} (تم استخدام الاستخراج العادي)")
             ext_data = parse_pdf_invoice_robust(file, inv_type)
+            if ext_data.get("note"):
+                st.info(f"ℹ️ {ext_data['note']}")
 
         if ext_data.get("error"):
             st.warning(f"⚠️ {ext_data['error']}")
