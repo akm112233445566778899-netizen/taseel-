@@ -1,4 +1,7 @@
 streamlit
 openpyxl
-google-genai
-pillow
+pandas
+google-generativeai
+Pillow
+pypdf
+pdfplumber
