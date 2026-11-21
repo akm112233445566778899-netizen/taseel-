@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import re
@@ -275,7 +276,30 @@ def ocr_text(uploaded_file):
         return ""
 
 
-def generic_extract(text):
+def ocr_header(uploaded_file):
+    """يقرأ أعلى الصفحة بحجم مكبّر (فيه غالباً رقم الفاتورة والتاريخ)"""
+    try:
+        import pytesseract
+        from PIL import Image
+
+        uploaded_file.seek(0)
+        if uploaded_file.name.lower().endswith(".pdf"):
+            with pdfplumber.open(uploaded_file) as pdf:
+                img = pdf.pages[0].to_image(resolution=300).original.convert("L")
+        else:
+            img = Image.open(uploaded_file).convert("L")
+        w, h = img.size
+        out = ""
+        for a, b in ((0.15, 0.24), (0.17, 0.21)):
+            crop = img.crop((0, int(h * a), w, int(h * b)))
+            crop = crop.resize((crop.width * 2, crop.height * 2))
+            out += pytesseract.image_to_string(crop, lang="eng", config="--psm 4") + "\n"
+        return out
+    except Exception:
+        return ""
+
+
+def generic_extract(text, text_layer="", header=""):
     """استخراج عام من أي نص فاتورة. القيم الناقصة تبقى فاضية"""
     text = convert_arabic_digits(text)
     res = {"inv_no": "", "inv_date": "", "tax_no": "", "supplier": "",
@@ -296,8 +320,8 @@ def generic_extract(text):
             res["amount"] = round(max(vals) / (1 + VAT_RATE), 2)
             res["note"] = "تم حساب المبلغ قبل الضريبة من الإجمالي (÷1.15)، تأكد منه."
 
-    # التاريخ: أول تاريخ ميلادي
-    dates = find_all_dates(text)
+    # التاريخ: أول تاريخ ميلادي (من النص كله ثم من أعلى الصفحة)
+    dates = find_all_dates(text) or find_all_dates(convert_arabic_digits(header))
     if dates:
         res["inv_date"] = dates[0].strftime("%Y-%m-%d")
 
@@ -311,11 +335,21 @@ def generic_extract(text):
     m = re.search(r"Invoice\s*(?:Number|No\.?)\D{0,15}(\d{3,15})", text, re.I)
     if m:
         res["inv_no"] = m.group(1)
+    elif header:
+        # سطر لوحده فيه أرقام فقط (6-10 خانات) في أعلى الصفحة
+        m = re.search(r"^\s*(\d{6,10})\s*$", convert_arabic_digits(header), re.M)
+        if m:
+            res["inv_no"] = m.group(1)
 
-    # اسم المورد
-    for m in re.finditer(r"(?:مؤسسة|شركة|مصنع|مكتب|مركز)[^\n\d|:]{3,50}", text):
-        name = m.group(0).strip()
-        if "الجمعية" not in name and "الدور" not in name:
+    # اسم المورد: من نص OCR، وإذا ما لقى من نص الـ PDF بعد عكس السطور
+    # (بعض الفواتير تخزّن العربي معكوس)
+    sources = text.split("\n") + [ln[::-1] for ln in (text_layer or "").split("\n")]
+    for line in sources:
+        m = re.search(r"(?:مؤسسة|شركة|مصنع|مكتب|مركز)[^\n\d|:]{3,50}", line)
+        if not m:
+            continue
+        name = re.sub(r"\s*الاسم\s*", " ", m.group(0)).strip()
+        if "الجمعية" not in name and "الدور" not in name and len(name) > 6:
             res["supplier"] = name
             break
 
@@ -372,7 +406,7 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
             if not data["inv_date"] and not extract_net_amount(full_text):
                 ocr = ocr_text(uploaded_file)
                 if ocr.strip():
-                    g = generic_extract(ocr)
+                    g = generic_extract(ocr, full_text_raw, ocr_header(uploaded_file))
                     data["raw_text"] = (
                         "--- نص OCR ---\n" + ocr + "\n--- نص PDF ---\n" + full_text_raw
                     )
@@ -386,7 +420,11 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
         else:
             # باقي الأنواع: نقرأ الصورة بالـ OCR إذا متوفر (أدق من نص PDF التالف)
             ocr = ocr_text(uploaded_file)
-            g = generic_extract(ocr if ocr.strip() else full_text)
+            g = generic_extract(
+                ocr if ocr.strip() else full_text,
+                full_text_raw,
+                ocr_header(uploaded_file) if ocr.strip() else "",
+            )
             data["raw_text"] = (
                 "--- نص OCR ---\n" + ocr + "\n--- نص PDF ---\n" + full_text_raw
                 if ocr.strip() else full_text_raw
@@ -494,6 +532,56 @@ def get_ai_data(uploaded_file):
     if key not in st.session_state:
         st.session_state[key] = ai_extract(uploaded_file)
     return st.session_state[key]
+
+
+CAT_COL_MAP = {
+    "الهاتف والبريد": "I",
+    "الكهرباء": "J",
+    "المياة": "K",
+    "الصيانة": "O",
+    "قرطاسيات ومطبوعات": "P",
+    "نظافة": "R",
+    "أخرى": "W",
+}
+
+
+def fill_workbook(wb, dar_name, group):
+    """يعبّي ملف إكسل بفواتير مجموعة (تصنيف واحد). يرجع True إذا التاريخ صالح"""
+    ws = wb.active
+    date_ok = True
+    try:
+        parsed_date = datetime.strptime(group[0]["inv_date"].strip(), "%Y-%m-%d")
+    except Exception:
+        parsed_date = datetime.today()
+        date_ok = False
+
+    ws["A2"] = (
+        f"تفريغ عهدة : {dar_name} شهر {get_arabic_month(parsed_date.month)}"
+        f" {parsed_date.year} م -"
+    )
+
+    start_row = 6
+    for idx, item in enumerate(group):
+        r = start_row + idx
+        ws[f"C{r}"] = item["statement"]
+        ws[f"D{r}"] = item["account_no"]
+
+        raw_inv = str(item["inv_no"]).strip()
+        ws[f"E{r}"] = int(raw_inv) if raw_inv.isdigit() else raw_inv
+
+        try:
+            ws[f"F{r}"] = datetime.strptime(item["inv_date"].strip(), "%Y-%m-%d")
+            ws[f"F{r}"].number_format = "yyyy-mm-dd"
+        except Exception:
+            ws[f"F{r}"] = item["inv_date"]
+
+        ws[f"G{r}"] = item["tax_no"]
+        ws[f"G{r}"].number_format = "@"
+        ws[f"H{r}"] = item["supplier"]
+
+        col_letter = CAT_COL_MAP.get(item["category"], "J")
+        ws[f"{col_letter}{r}"] = float(item["amount"])
+    return date_ok
 
 
 # ----------------------------------------------------------------------
@@ -673,92 +761,74 @@ if uploaded_files:
 
     st.subheader("3️⃣ المعالجة والإرسال")
 
+    # تصنيفات الفواتير المرفوعة (بالترتيب)
+    cats_used = []
+    for item in invoices_data:
+        if item["category"] not in cats_used:
+            cats_used.append(item["category"])
+
+    st.caption(
+        "اختر ملف الإكسل لكل تصنيف. إذا ما اخترت، يُستخدم النموذج الافتراضي."
+    )
+    template_uploads = {}
+    for cat in cats_used:
+        n = sum(1 for it in invoices_data if it["category"] == cat)
+        template_uploads[cat] = st.file_uploader(
+            f"📂 ملف الإكسل لتصنيف «{cat}» ({n} فاتورة)",
+            type=["xlsx"],
+            key=f"tpl_{cat}",
+        )
+
     if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        excel_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
+        default_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
+        outputs = []
 
-        if os.path.exists(excel_path):
+        for cat in cats_used:
+            group = [it for it in invoices_data if it["category"] == cat]
+            up = template_uploads.get(cat)
             try:
-                wb = openpyxl.load_workbook(excel_path)
-                ws = wb.active
+                if up is not None:
+                    up.seek(0)
+                    wb = openpyxl.load_workbook(io.BytesIO(up.read()))
+                elif os.path.exists(default_path):
+                    wb = openpyxl.load_workbook(default_path)
+                else:
+                    st.error(
+                        f"تصنيف «{cat}»: ما اخترت ملف إكسل، وملف النموذج الافتراضي"
+                        f" `{default_path}` غير موجود في مجلد التطبيق."
+                    )
+                    continue
 
-                first_inv_date_str = invoices_data[0]["inv_date"].strip()
-                try:
-                    parsed_date = datetime.strptime(first_inv_date_str, "%Y-%m-%d")
-                except Exception:
+                if not fill_workbook(wb, dar_name, group):
                     st.warning(
-                        "⚠️ تاريخ الفاتورة الأولى غير صالح (الصيغة المطلوبة"
-                        " YYYY-MM-DD)، تم استخدام تاريخ اليوم في عنوان التفريغ."
-                    )
-                    parsed_date = datetime.today()
-
-                inv_month_name = get_arabic_month(parsed_date.month)
-                inv_year = parsed_date.year
-
-                ws["A2"] = (
-                    f"تفريغ عهدة : {dar_name} شهر {inv_month_name} {inv_year} م -"
-                )
-
-                start_row = 6
-
-                cat_col_map = {
-                    "الهاتف والبريد": "I",
-                    "الكهرباء": "J",
-                    "المياة": "K",
-                    "الصيانة": "O",
-                    "قرطاسيات ومطبوعات": "P",
-                    "نظافة": "R",
-                    "أخرى": "W",
-                }
-
-                for idx, item in enumerate(invoices_data):
-                    current_row = start_row + idx
-
-                    ws[f"C{current_row}"] = item["statement"]
-                    ws[f"D{current_row}"] = item["account_no"]
-
-                    raw_inv = str(item["inv_no"]).strip()
-                    ws[f"E{current_row}"] = (
-                        int(raw_inv) if raw_inv.isdigit() else raw_inv
+                        f"⚠️ تصنيف «{cat}»: تاريخ الفاتورة الأولى غير صالح (الصيغة"
+                        " YYYY-MM-DD)، تم استخدام تاريخ اليوم في العنوان."
                     )
 
-                    # حفظ التاريخ كتاريخ حقيقي في الإكسل (وليس نص)
-                    try:
-                        inv_dt = datetime.strptime(item["inv_date"].strip(), "%Y-%m-%d")
-                        ws[f"F{current_row}"] = inv_dt
-                        ws[f"F{current_row}"].number_format = "yyyy-mm-dd"
-                    except Exception:
-                        ws[f"F{current_row}"] = item["inv_date"]
-
-                    ws[f"G{current_row}"] = item["tax_no"]
-                    ws[f"G{current_row}"].number_format = "@"
-                    ws[f"H{current_row}"] = item["supplier"]
-
-                    col_letter = cat_col_map.get(item["category"], "J")
-                    ws[f"{col_letter}{current_row}"] = float(item["amount"])
-
-                output_filename = f"تفريغ_عهدة_{dar_name}_2026.xlsx"
-                wb.save(output_filename)
-
-                st.success(f"🎉 تم تفريغ البيانات لـ ({dar_name}) بنجاح!")
-
-                with open(output_filename, "rb") as f:
-                    st.download_button(
-                        label="📥 تحميل ملف Excel المفرغ جاهز للرفع",
-                        data=f,
-                        file_name=output_filename,
-                        mime=(
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        ),
-                    )
-
-                st.link_button(
-                    "🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف",
-                    "https://fanar.gqb.org.sa/requests/home",
+                buf = io.BytesIO()
+                wb.save(buf)
+                suffix = f"_{cat}" if len(cats_used) > 1 else ""
+                outputs.append(
+                    (f"تفريغ_عهدة_{dar_name}{suffix}_2026.xlsx", buf.getvalue())
                 )
             except Exception as e:
-                st.error(f"حدث خطأ أثناء معالجة ملف الإكسل: {e}")
-        else:
-            st.error(
-                f"لم يتم العثور على ملف النموذج المعتمد: `{excel_path}` في مجلد"
-                " التطبيق!"
+                st.error(f"حدث خطأ أثناء معالجة ملف تصنيف «{cat}»: {e}")
+
+        # نحفظها في session_state عشان تبقى أزرار التحميل بعد أي تحديث للصفحة
+        st.session_state["outputs"] = outputs
+
+    outputs = st.session_state.get("outputs", [])
+    if outputs:
+        st.success(f"🎉 تم تجهيز {len(outputs)} ملف!")
+        for i, (fname, data) in enumerate(outputs):
+            st.download_button(
+                label=f"📥 تحميل {fname}",
+                data=data,
+                file_name=fname,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_{i}",
             )
+        st.link_button(
+            "🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف",
+            "https://fanar.gqb.org.sa/requests/home",
+        )
