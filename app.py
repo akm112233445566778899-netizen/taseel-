@@ -810,37 +810,40 @@ if uploaded_files:
         if item["category"] not in cats_used:
             cats_used.append(item["category"])
 
-    st.caption(
-        "اختر ملف الإكسل لكل تصنيف. إذا ما اخترت، يُستخدم النموذج الافتراضي."
+    # ملفات الإكسل الموجودة في مجلد التطبيق (نفس مكان app.py على GitHub)
+    DEFAULT_TEMPLATE = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
+    xlsx_files = sorted(
+        f for f in os.listdir(".")
+        if f.lower().endswith(".xlsx") and not f.startswith("~$")
     )
-    template_uploads = {}
+    if not xlsx_files:
+        st.error("ما فيه أي ملف إكسل في مجلد التطبيق. أضف النموذج على GitHub بجانب app.py.")
+
+    default_idx = xlsx_files.index(DEFAULT_TEMPLATE) if DEFAULT_TEMPLATE in xlsx_files else 0
+
+    st.caption("اختر ملف الإكسل لكل تصنيف من الملفات الموجودة في التطبيق.")
+    chosen_files = {}
     for cat in cats_used:
         n = sum(1 for it in invoices_data if it["category"] == cat)
-        template_uploads[cat] = st.file_uploader(
-            f"📂 ملف الإكسل لتصنيف «{cat}» ({n} فاتورة)",
-            type=["xlsx"],
-            key=f"tpl_{cat}",
-        )
+        if xlsx_files:
+            chosen_files[cat] = st.selectbox(
+                f"📂 ملف الإكسل لتصنيف «{cat}» ({n} فاتورة)",
+                xlsx_files,
+                index=default_idx,
+                key=f"tpl_{cat}",
+            )
 
     if st.button("🚀 تفريغ العهدة والتجهيز لمنصة فنار"):
-        default_path = "نموذج عهدة الادارة العامة 2026.xlsx.xlsx"
         outputs = []
 
         for cat in cats_used:
             group = [it for it in invoices_data if it["category"] == cat]
-            up = template_uploads.get(cat)
+            path = chosen_files.get(cat)
             try:
-                if up is not None:
-                    up.seek(0)
-                    wb = openpyxl.load_workbook(io.BytesIO(up.read()))
-                elif os.path.exists(default_path):
-                    wb = openpyxl.load_workbook(default_path)
-                else:
-                    st.error(
-                        f"تصنيف «{cat}»: ما اخترت ملف إكسل، وملف النموذج الافتراضي"
-                        f" `{default_path}` غير موجود في مجلد التطبيق."
-                    )
+                if not path or not os.path.exists(path):
+                    st.error(f"تصنيف «{cat}»: ملف الإكسل المختار غير موجود في مجلد التطبيق.")
                     continue
+                wb = openpyxl.load_workbook(path)
 
                 if not fill_workbook(wb, dar_name, group):
                     st.warning(
