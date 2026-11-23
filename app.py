@@ -41,7 +41,7 @@ VAT_RATE = 0.15
 # ----------------------------------------------------------------------
 # أنواع الفواتير: لإضافة نوع جديد أضف سطر هنا فقط
 #   category : بند الحساب (لازم يكون من CATEGORIES)
-#   statement: نص البيان ({dar} يتبدل باسم الدار)
+#   statement: (غير مستخدم، البيان صار «سداد فاتورة» + اسم المورد)
 #   supplier : اسم المورد الافتراضي
 #   tax_no   : الرقم الضريبي الافتراضي
 #   electric : True = يستخدم الاستخراج المخصص لفواتير الكهرباء
@@ -941,10 +941,11 @@ if uploaded_files:
                 key=f"amt_{fk}_{inv_type}",
             )
 
+            # البيان: "سداد فاتورة" + اسم المورد (يتحدث لما تغيّر اسم المورد)
             statement = st.text_input(
                 f"البيان #{idx+1}",
-                value=cfg["statement"].format(dar=dar_name),
-                key=f"st_{fk}_{dar_name}_{inv_type}",
+                value=f"سداد فاتورة {supplier.strip()}".strip(),
+                key=f"st_{fk}_{zlib.crc32(supplier.strip().encode('utf-8'))}",
             )
 
             category = st.selectbox(
