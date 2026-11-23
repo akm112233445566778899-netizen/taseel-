@@ -621,16 +621,39 @@ def detect_type_free(uploaded_file):
 
 # ----------------------------------------------------------------------
 # القراءة بالذكاء الاصطناعي (تقرأ أي فاتورة: PDF أو صورة)
-# مفتاح GEMINI_API_KEY (مجاني) أو ANTHROPIC_API_KEY في Secrets، وإذا ما وُجد يرجع للاستخراج القديم
+# تحتاج مفتاح ANTHROPIC_API_KEY في Secrets، وإذا ما وُجد يرجع للاستخراج القديم
 # ----------------------------------------------------------------------
 AI_MODEL = "claude-sonnet-5-5"
-# موديلات Gemini بالترتيب (إذا الأول مشغول أو غير متاح يجرب الثاني)
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 
-def _ai_prompt():
-    types_list = " | ".join(INVOICE_TYPES.keys())
-    return f"""اقرأ هذه الفاتورة (سعودية غالباً، قد تكون صورة جوال لإيصال أو فاتورة ضريبية مبسطة) وأرجع JSON فقط بدون أي شرح أو علامات ```.
+def ai_extract(uploaded_file):
+    try:
+        import anthropic
+
+        api_key = st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        return {"error": "no_key"}
+
+    try:
+        uploaded_file.seek(0)
+        raw = uploaded_file.read()
+        b64 = base64.standard_b64encode(raw).decode()
+        name = uploaded_file.name.lower()
+
+        if name.endswith(".pdf"):
+            block = {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
+            }
+        else:
+            media = "image/png" if name.endswith(".png") else "image/jpeg"
+            block = {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media, "data": b64},
+            }
+
+        types_list = " | ".join(INVOICE_TYPES.keys())
+        prompt = f"""اقرأ هذه الفاتورة (سعودية غالباً، قد تكون صورة جوال لإيصال أو فاتورة ضريبية مبسطة) وأرجع JSON فقط بدون أي شرح أو علامات ```.
 المفاتيح:
 - "supplier": اسم المورد/المحل البائع (مو اسم الجمعية العميلة)
 - "inv_no": رقم الفاتورة نفسها، وليس الرقم الضريبي ولا السجل التجاري ولا رقم الجوال ولا الباركود
@@ -643,91 +666,15 @@ def _ai_prompt():
 - "type": نوع الفاتورة، اختر واحداً بالضبط من: {types_list}
 حوّل الأرقام العربية (٠١٢٣) إلى إنجليزية. إذا لم تجد قيمة اتركها "" أو 0، ولا تخمّن."""
 
-
-def _clean_json(text):
-    text = text.replace("```json", "").replace("```", "").strip()
-    a, b = text.find("{"), text.rfind("}")
-    if a != -1 and b != -1:
-        text = text[a:b + 1]
-    return json.loads(text)
-
-
-def _secret(name):
-    try:
-        return st.secrets[name]
-    except Exception:
-        return None
-
-
-def _gemini_extract(raw, name, api_key):
-    """Google Gemini (فيه باقة مجانية). نستخدم REST مباشرة بدون مكتبات إضافية"""
-    import urllib.request
-    import urllib.error
-
-    if name.endswith(".pdf"):
-        mime = "application/pdf"
-    elif name.endswith(".png"):
-        mime = "image/png"
-    else:
-        mime = "image/jpeg"
-    body = {
-        "contents": [{"parts": [
-            {"inline_data": {"mime_type": mime, "data": base64.standard_b64encode(raw).decode()}},
-            {"text": _ai_prompt()},
-        ]}],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
-    }
-    last_err = None
-    for model in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        req = urllib.request.Request(
-            url, data=json.dumps(body).encode(), method="POST",
-            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=AI_MODEL,
+            max_tokens=1000,
+            messages=[{"role": "user", "content": [block, {"type": "text", "text": prompt}]}],
         )
-        try:
-            with urllib.request.urlopen(req, timeout=90) as r:
-                data = json.loads(r.read().decode())
-            parts = data["candidates"][0]["content"]["parts"]
-            return _clean_json("".join(p.get("text", "") for p in parts))
-        except urllib.error.HTTPError as e:
-            last_err = f"{model}: HTTP {e.code} {e.read().decode(errors='ignore')[:200]}"
-            if e.code in (400, 401, 403):
-                break  # مفتاح غلط أو طلب غلط: ما يفيد نجرب موديل ثاني
-        except Exception as e:
-            last_err = f"{model}: {e}"
-    raise RuntimeError(last_err or "unknown")
-
-
-def _claude_extract(raw, name, api_key):
-    import anthropic
-
-    b64 = base64.standard_b64encode(raw).decode()
-    if name.endswith(".pdf"):
-        block = {"type": "document",
-                 "source": {"type": "base64", "media_type": "application/pdf", "data": b64}}
-    else:
-        media = "image/png" if name.endswith(".png") else "image/jpeg"
-        block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=AI_MODEL, max_tokens=1000,
-        messages=[{"role": "user", "content": [block, {"type": "text", "text": _ai_prompt()}]}],
-    )
-    return _clean_json("".join(b.text for b in resp.content if b.type == "text"))
-
-
-def ai_extract(uploaded_file):
-    gem_key = _secret("GEMINI_API_KEY")
-    claude_key = _secret("ANTHROPIC_API_KEY")
-    if not gem_key and not claude_key:
-        return {"error": "no_key"}
-    try:
-        uploaded_file.seek(0)
-        raw = uploaded_file.read()
-        name = uploaded_file.name.lower()
-        if gem_key:
-            return _gemini_extract(raw, name, gem_key)
-        return _claude_extract(raw, name, claude_key)
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        text = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
     except Exception as e:
         return {"error": f"تعذرت القراءة بالذكاء الاصطناعي: {e}"}
 
