@@ -253,6 +253,14 @@ BUYER_TAX = "310834779300003"
 
 def ocr_text(uploaded_file):
     """يحوّل الصفحة لصورة ويقرأها بـ Tesseract. يرجع "" إذا الأداة غير متوفرة"""
+    ck = f"ocrT_{uploaded_file.name}_{getattr(uploaded_file, 'size', 0)}"
+    if ck in st.session_state:
+        return st.session_state[ck]
+    st.session_state[ck] = _ocr_text(uploaded_file)
+    return st.session_state[ck]
+
+
+def _ocr_text(uploaded_file):
     try:
         import pytesseract
         from PIL import Image
@@ -284,6 +292,14 @@ def ocr_text(uploaded_file):
 
 def ocr_header(uploaded_file):
     """يقرأ أعلى الصفحة بحجم مكبّر (فيه غالباً رقم الفاتورة والتاريخ)"""
+    ck = f"ocrH_{uploaded_file.name}_{getattr(uploaded_file, 'size', 0)}"
+    if ck in st.session_state:
+        return st.session_state[ck]
+    st.session_state[ck] = _ocr_header(uploaded_file)
+    return st.session_state[ck]
+
+
+def _ocr_header(uploaded_file):
     try:
         import pytesseract
         from PIL import Image
@@ -536,7 +552,7 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
             g = generic_extract(
                 ocr if ocr.strip() else full_text,
                 full_text_raw,
-                ocr_header(uploaded_file) if ocr.strip() else "",
+                ocr_header(uploaded_file) if (ocr.strip() and len(full_text_raw.strip()) > 30) else "",
             )
             data["raw_text"] = (
                 "--- نص OCR ---\n" + ocr + "\n--- نص PDF ---\n" + full_text_raw
@@ -800,6 +816,83 @@ def fill_workbook(wb, dar_name, group, kind="تصفية"):
 
 
 # ----------------------------------------------------------------------
+# ملف PDF فيه عدة فواتير: نقسمه صفحة = فاتورة
+# ----------------------------------------------------------------------
+class PageUnit(io.BytesIO):
+    """صفحة وحدة من PDF، تتصرف مثل ملف مرفوع (لها name و size)"""
+
+    def __init__(self, data, name):
+        super().__init__(data)
+        self.name = name
+        self.size = len(data)
+
+
+def pdf_info(uploaded_file):
+    """(عدد الصفحات، هل الملف فيه نص قابل للقراءة). الملفات الممسوحة ضوئياً ما فيها نص"""
+    key = f"info_{uploaded_file.name}_{uploaded_file.size}"
+    if key not in st.session_state:
+        n, has_text = 1, True
+        try:
+            uploaded_file.seek(0)
+            with pdfplumber.open(uploaded_file) as pdf:
+                n = len(pdf.pages)
+                has_text = any(
+                    len((pg.extract_text() or "").strip()) > 30 for pg in pdf.pages[:3]
+                )
+        except Exception:
+            pass
+        st.session_state[key] = (n, has_text)
+    return st.session_state[key]
+
+
+def split_pdf(uploaded_file):
+    """يقسم PDF إلى ملفات من صفحة وحدة. يرجع [] إذا فشل (يُعامل كفاتورة وحدة)"""
+    key = f"split_{uploaded_file.name}_{uploaded_file.size}"
+    if key not in st.session_state:
+        units = []
+        try:
+            from pypdf import PdfReader, PdfWriter
+
+            uploaded_file.seek(0)
+            reader = PdfReader(uploaded_file)
+            base = uploaded_file.name.rsplit(".", 1)[0]
+            for i, page in enumerate(reader.pages):
+                w = PdfWriter()
+                w.add_page(page)
+                buf = io.BytesIO()
+                w.write(buf)
+                units.append(PageUnit(buf.getvalue(), f"{base} - صفحة {i + 1}.pdf"))
+        except Exception:
+            units = []
+        st.session_state[key] = units
+    return st.session_state[key]
+
+
+def page_preview(uploaded_file):
+    """صورة مصغّرة للفاتورة (أول صفحة) عشان تقارنها بالبيانات المقروءة"""
+    key = f"prev_{uploaded_file.name}_{getattr(uploaded_file, 'size', 0)}"
+    if key not in st.session_state:
+        png = None
+        try:
+            uploaded_file.seek(0)
+            if uploaded_file.name.lower().endswith(".pdf"):
+                with pdfplumber.open(uploaded_file) as pdf:
+                    img = pdf.pages[0].to_image(resolution=90).original.convert("RGB")
+            else:
+                from PIL import Image
+
+                img = Image.open(uploaded_file).convert("RGB")
+                img.thumbnail((900, 1200))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=70)
+            png = buf.getvalue()
+        except Exception:
+            pass
+        st.session_state[key] = png
+    return st.session_state[key]
+
+
+# ----------------------------------------------------------------------
 # الواجهة
 # ----------------------------------------------------------------------
 dar_list = [
@@ -839,7 +932,39 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    st.success(f"✅ تم استلام {len(uploaded_files)} فاتورة بنجاح!")
+    # نحوّل الملفات إلى «فواتير»: ملف PDF فيه عدة صفحات ممكن يكون كل صفحة فاتورة
+    units = []
+    for up in uploaded_files:
+        is_pdf = up.name.lower().endswith(".pdf")
+        n_pages, has_text = pdf_info(up) if is_pdf else (1, True)
+        multi = False
+        if is_pdf and n_pages > 1:
+            multi = st.checkbox(
+                f"📑 «{up.name}» فيه {n_pages} صفحات، اعتبر كل صفحة فاتورة مستقلة",
+                value=not has_text,  # الممسوح ضوئياً غالباً فواتير مجمّعة
+                key=f"multi_{up.name}_{up.size}",
+            )
+        pages = split_pdf(up) if multi else []
+        units.extend(pages if pages else [up])
+
+    st.success(f"✅ تم استلام {len(units)} فاتورة بنجاح!")
+
+    # قراءة الصور (OCR) تاخذ وقت، فنسويها مرة وحدة مع شريط تقدم، وتنحفظ ما تنعاد
+    def needs_ocr(u):
+        name = u.name.lower()
+        if name.endswith(".pdf"):
+            return not pdf_info(u)[1]  # ملف بدون نص = ممسوح ضوئياً
+        return name.endswith((".png", ".jpg", ".jpeg"))
+
+    todo = [u for u in units if needs_ocr(u) and f"ocrT_{u.name}_{u.size}" not in st.session_state]
+    if todo:
+        bar = st.progress(0, text="جاري قراءة الفواتير...")
+        for i, u in enumerate(todo):
+            ocr_text(u)
+            page_preview(u)
+            bar.progress((i + 1) / len(todo), text=f"جاري قراءة الفاتورة {i + 1} من {len(todo)}...")
+        bar.empty()
+
     st.divider()
 
     st.subheader("2️⃣ مراجعة وتحديد البيانات")
@@ -847,9 +972,19 @@ if uploaded_files:
     invoices_data = []
     type_names = list(INVOICE_TYPES.keys())
 
-    for idx, file in enumerate(uploaded_files):
-        st.markdown(f"### 📄 الفاتورة رقم ({idx + 1}): `{file.name}`")
+    for idx, file in enumerate(units):
         fk = f"{idx}_{file.size}_{zlib.crc32(file.name.encode('utf-8'))}"
+        include = st.checkbox(
+            f"📄 الفاتورة رقم ({idx + 1}): {file.name} — أدرجها في الملف",
+            value=True,
+            key=f"inc_{fk}",
+        )
+        if not include:
+            continue
+        with st.expander("👁️ عرض صورة الفاتورة للمقارنة"):
+            prev = page_preview(file)
+            if prev:
+                st.image(prev, use_container_width=True)
 
         with st.spinner(f"🔍 جاري قراءة الفاتورة #{idx + 1}..."):
             ai = get_ai_data(file)
