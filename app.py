@@ -984,7 +984,7 @@ if uploaded_files:
         with st.expander("👁️ عرض صورة الفاتورة للمقارنة"):
             prev = page_preview(file)
             if prev:
-                st.image(prev, use_container_width=True)
+                st.image(prev)
 
         with st.spinner(f"🔍 جاري قراءة الفاتورة #{idx + 1}..."):
             ai = get_ai_data(file)
