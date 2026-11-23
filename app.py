@@ -47,65 +47,46 @@ VAT_RATE = 0.15
 #   electric : True = يستخدم الاستخراج المخصص لفواتير الكهرباء
 # ----------------------------------------------------------------------
 CATEGORIES = [
+    "الهاتف والبريد",
     "الكهرباء",
     "المياة",
-    "الهاتف والبريد",
-    "الصيانة",
+    "الأصول",
+    "اثاث وتجهيزات مكتبية",
+    "الحاسب الالي",
+    "صيانة مباني",
     "قرطاسيات ومطبوعات",
+    "دعاية وإعلان",
     "نظافة",
+    "ضيافة و بوفية",
+    "هدايا",
+    "المحروقات",
+    "صيانة سيارات",
     "أخرى",
 ]
 
+
+def _t(category, statement, supplier="", tax_no="", electric=False):
+    return {"category": category, "statement": statement + " - {dar}",
+            "supplier": supplier, "tax_no": tax_no, "electric": electric}
+
+
 INVOICE_TYPES = {
-    "فاتورة كهرباء": {
-        "category": "الكهرباء",
-        "statement": "سداد فاتورة كهرباء - {dar}",
-        "supplier": "الشركة السعودية للكهرباء",
-        "tax_no": "300000361310003",
-        "electric": True,
-    },
-    "فاتورة مياه": {
-        "category": "المياة",
-        "statement": "سداد فاتورة مياه - {dar}",
-        "supplier": "شركة المياه الوطنية",
-        "tax_no": "",
-        "electric": False,
-    },
-    "فاتورة هاتف / إنترنت": {
-        "category": "الهاتف والبريد",
-        "statement": "سداد فاتورة هاتف وإنترنت - {dar}",
-        "supplier": "",
-        "tax_no": "",
-        "electric": False,
-    },
-    "فاتورة صيانة": {
-        "category": "الصيانة",
-        "statement": "سداد فاتورة صيانة - {dar}",
-        "supplier": "",
-        "tax_no": "",
-        "electric": False,
-    },
-    "قرطاسيات ومطبوعات": {
-        "category": "قرطاسيات ومطبوعات",
-        "statement": "شراء قرطاسيات ومطبوعات - {dar}",
-        "supplier": "",
-        "tax_no": "",
-        "electric": False,
-    },
-    "فاتورة نظافة": {
-        "category": "نظافة",
-        "statement": "سداد فاتورة نظافة - {dar}",
-        "supplier": "",
-        "tax_no": "",
-        "electric": False,
-    },
-    "أخرى": {
-        "category": "أخرى",
-        "statement": "سداد فاتورة - {dar}",
-        "supplier": "",
-        "tax_no": "",
-        "electric": False,
-    },
+    "فاتورة كهرباء": _t("الكهرباء", "سداد فاتورة كهرباء",
+                        "الشركة السعودية للكهرباء", "300000361310003", True),
+    "فاتورة مياه": _t("المياة", "سداد فاتورة مياه", "شركة المياه الوطنية"),
+    "فاتورة هاتف / إنترنت": _t("الهاتف والبريد", "سداد فاتورة هاتف وإنترنت"),
+    "فاتورة صيانة": _t("صيانة مباني", "سداد فاتورة صيانة"),
+    "صيانة سيارات": _t("صيانة سيارات", "سداد فاتورة صيانة سيارات"),
+    "قرطاسيات ومطبوعات": _t("قرطاسيات ومطبوعات", "شراء قرطاسيات ومطبوعات"),
+    "فاتورة نظافة": _t("نظافة", "سداد فاتورة نظافة"),
+    "ضيافة وبوفية": _t("ضيافة و بوفية", "شراء ضيافة وبوفية"),
+    "هدايا": _t("هدايا", "شراء هدايا"),
+    "دعاية وإعلان": _t("دعاية وإعلان", "سداد فاتورة دعاية وإعلان"),
+    "محروقات": _t("المحروقات", "شراء محروقات"),
+    "أثاث وتجهيزات مكتبية": _t("اثاث وتجهيزات مكتبية", "شراء أثاث وتجهيزات مكتبية"),
+    "حاسب آلي وملحقاته": _t("الحاسب الالي", "شراء حاسب آلي وملحقاته"),
+    "أصول": _t("الأصول", "شراء أصول"),
+    "أخرى": _t("أخرى", "سداد فاتورة"),
 }
 
 
@@ -622,53 +603,149 @@ def get_ai_data(uploaded_file):
     return st.session_state[key]
 
 
-CAT_COL_MAP = {
-    "الهاتف والبريد": "I",
-    "الكهرباء": "J",
-    "المياة": "K",
-    "الصيانة": "O",
-    "قرطاسيات ومطبوعات": "P",
-    "نظافة": "R",
-    "أخرى": "W",
+# تخطيط النموذج القديم (احتياطي إذا ما انلقى صف عناوين في الملف)
+OLD_LAYOUT = {
+    "start": 6,
+    "fields": {"statement": "C", "account_no": "D", "inv_no": "E",
+               "inv_date": "F", "tax_no": "G", "supplier": "H"},
+    "cats": {"الهاتف والبريد": "I", "الكهرباء": "J", "المياة": "K",
+             "صيانة مباني": "O", "قرطاسيات ومطبوعات": "P", "نظافة": "R", "أخرى": "W"},
+    "tax_col": None,
 }
 
+# أسماء بديلة لعناوين الأعمدة
+HEADER_ALIASES = {"الصيانة": "صيانة مباني", "المياه": "المياة"}
 
-def fill_workbook(wb, dar_name, group):
-    """يعبّي ملف إكسل بفواتير مجموعة (تصنيف واحد). يرجع True إذا التاريخ صالح"""
+
+def norm(t):
+    """توحيد النص العربي للمقارنة (مسافات، همزات، ة/ه)"""
+    t = re.sub(r"\s+", "", str(t or ""))
+    for ch in "أإآ":
+        t = t.replace(ch, "ا")
+    return t.replace("ة", "ه").replace("ى", "ي")
+
+
+def detect_layout(ws):
+    """يقرأ صف العناوين (اللي فيه «البيان») ويحدد عمود كل حقل وكل بند"""
+    for hr in range(1, 15):
+        row_map = {}
+        for c in ws[hr]:
+            if c.value is not None:
+                row_map[norm(c.value)] = c.column_letter
+        if "البيان" not in row_map:
+            continue
+        lay = {"start": hr + 1, "fields": {}, "cats": {}, "tax_col": None}
+        for key, name in (("statement", "البيان"), ("inv_no", "رقمالفاتوره"),
+                          ("inv_date", "التاريخ"), ("tax_no", "الرقمالضريبي"),
+                          ("supplier", "اسمالمورد"), ("account_no", "رقمالحساب")):
+            if name in row_map:
+                lay["fields"][key] = row_map[name]
+        for cat in CATEGORIES:
+            if norm(cat) in row_map:
+                lay["cats"][cat] = row_map[norm(cat)]
+        for alias, cat in HEADER_ALIASES.items():
+            if norm(alias) in row_map and cat not in lay["cats"]:
+                lay["cats"][cat] = row_map[norm(alias)]
+        for k, v in row_map.items():
+            if "ضريبه" in k and "مشتريات" in k:
+                lay["tax_col"] = v
+        return lay
+    return None
+
+
+def _data_end_row(ws, lay):
+    """آخر صف بيانات: الصفوف المرقّمة في عمود A، وإلا آخر صف في الورقة"""
+    start = lay["start"]
+    if isinstance(ws[f"A{start}"].value, (int, float)):
+        r = start
+        while isinstance(ws[f"A{r + 1}"].value, (int, float)):
+            r += 1
+        return r
+    return ws.max_row
+
+
+def fill_workbook(wb, dar_name, group, kind="تصفية"):
+    """يضيف فواتير تصنيف واحد بعد البنود الموجودة في الملف. يرجع True إذا التاريخ صالح"""
     ws = wb.active
+    lay = detect_layout(ws) or OLD_LAYOUT
+    fields, cats = lay["fields"], lay["cats"]
+    end = _data_end_row(ws, lay)
+    check_cols = list(fields.values()) + list(cats.values())
+
+    def is_empty(r):
+        return all(ws[f"{c}{r}"].value in (None, "") for c in check_cols)
+
     date_ok = True
     try:
-        parsed_date = datetime.strptime(group[0]["inv_date"].strip(), "%Y-%m-%d")
+        parsed = datetime.strptime(group[0]["inv_date"].strip(), "%Y-%m-%d")
     except Exception:
-        parsed_date = datetime.today()
+        parsed = datetime.today()
         date_ok = False
+    month_name = get_arabic_month(parsed.month)
 
-    ws["A2"] = (
-        f"تفريغ عهدة : {dar_name} شهر {get_arabic_month(parsed_date.month)}"
-        f" {parsed_date.year} م -"
-    )
+    # العنوان (A2): النموذج الجديد له صيغة، والقديم صيغة ثانية
+    a2 = str(ws["A2"].value or "")
+    if "عهدة دار" in a2 or "طلب - تصفية" in a2:
+        ws["A2"] = f"عهدة دار ({dar_name}) : ({kind}) شهر ({month_name}) {parsed.year} م - "
+    else:
+        ws["A2"] = f"تفريغ عهدة : {dar_name} شهر {month_name} {parsed.year} م -"
 
-    start_row = 6
-    for idx, item in enumerate(group):
-        r = start_row + idx
-        ws[f"C{r}"] = item["statement"]
-        ws[f"D{r}"] = item["account_no"]
+    row = lay["start"]
+    for item in group:
+        while row <= end and not is_empty(row):
+            row += 1
+        if row > end:
+            raise ValueError(
+                f"الملف ما فيه صفوف فاضية كافية (آخر صف بيانات {end}). "
+                "استخدم ملف ثاني أو قسّم الفواتير."
+            )
+
+        statement = item["statement"]
+        # النموذج الجديد ما فيه عمود رقم الحساب، فنضيفه للبيان عشان ما يضيع
+        if item["account_no"] and "account_no" not in fields:
+            statement = f"{statement} - حساب رقم {item['account_no']}"
+
+        def put(key, value):
+            col = fields.get(key)
+            if col:
+                ws[f"{col}{row}"] = value
+            return col
+
+        put("statement", statement)
+        put("account_no", item["account_no"])
 
         raw_inv = str(item["inv_no"]).strip()
-        ws[f"E{r}"] = int(raw_inv) if raw_inv.isdigit() else raw_inv
+        put("inv_no", int(raw_inv) if raw_inv.isdigit() else raw_inv)
 
-        try:
-            ws[f"F{r}"] = datetime.strptime(item["inv_date"].strip(), "%Y-%m-%d")
-            ws[f"F{r}"].number_format = "yyyy-mm-dd"
-        except Exception:
-            ws[f"F{r}"] = item["inv_date"]
+        col = fields.get("inv_date")
+        if col:
+            cell = ws[f"{col}{row}"]
+            try:
+                cell.value = datetime.strptime(item["inv_date"].strip(), "%Y-%m-%d")
+                if cell.number_format == "General":
+                    cell.number_format = "yyyy-mm-dd"
+            except Exception:
+                cell.value = item["inv_date"]
 
-        ws[f"G{r}"] = item["tax_no"]
-        ws[f"G{r}"].number_format = "@"
-        ws[f"H{r}"] = item["supplier"]
+        col = fields.get("tax_no")
+        if col:
+            cell = ws[f"{col}{row}"]
+            cell.value = str(item["tax_no"])
+            if cell.number_format == "General":
+                cell.number_format = "@"
 
-        col_letter = CAT_COL_MAP.get(item["category"], "J")
-        ws[f"{col_letter}{r}"] = float(item["amount"])
+        put("supplier", item["supplier"])
+
+        cat_col = cats.get(item["category"]) or cats.get("أخرى")
+        if not cat_col:
+            raise ValueError(f"ما لقيت عمود لبند «{item['category']}» في الملف.")
+        ws[f"{cat_col}{row}"] = float(item["amount"])
+
+        # عمود الضريبة في النموذج معادلة (15% دائماً)، فللفاتورة بدون ضريبة نصفّره
+        if item.get("vat_free") and lay.get("tax_col"):
+            ws[f"{lay['tax_col']}{row}"] = 0
+
+        row += 1
     return date_ok
 
 
@@ -834,6 +911,8 @@ if uploaded_files:
             )
             vat_part = 0.0 if vat_free else round(amount * VAT_RATE, 2)
             estimated_total = round(amount + vat_part, 2)
+            if estimated_total > 1500:
+                st.warning("⚠️ الفاتورة تزيد عن 1500 ريال، لازم ترفق عروض أسعار.")
             written_amount = tafqeet_arabic(estimated_total)
             written_text = st.text_input(
                 f"المبلغ كتابةً (تفقيط) #{idx+1}",
@@ -851,6 +930,7 @@ if uploaded_files:
             "statement": statement,
             "category": category,
             "written_amount": written_text,
+            "vat_free": vat_free,
         })
         st.markdown("---")
 
@@ -871,7 +951,17 @@ if uploaded_files:
     if not xlsx_files:
         st.error("ما فيه أي ملف إكسل في مجلد التطبيق. أضف النموذج على GitHub بجانب app.py.")
 
-    default_idx = xlsx_files.index(DEFAULT_TEMPLATE) if DEFAULT_TEMPLATE in xlsx_files else 0
+    # الأفضل نموذج «طلب صرف عهدة / تصفية عهدة» إذا موجود، وإلا النموذج القديم
+    default_idx = 0
+    for i, f in enumerate(xlsx_files):
+        if "طلب" in f and "صرف" in f:
+            default_idx = i
+            break
+    else:
+        if DEFAULT_TEMPLATE in xlsx_files:
+            default_idx = xlsx_files.index(DEFAULT_TEMPLATE)
+
+    kind = st.radio("نوع الطلب (للنموذج الجديد)", ["تصفية", "طلب"], horizontal=True)
 
     st.caption("اختر ملف الإكسل لكل تصنيف من الملفات الموجودة في التطبيق.")
     chosen_files = {}
@@ -897,7 +987,7 @@ if uploaded_files:
                     continue
                 wb = openpyxl.load_workbook(path)
 
-                if not fill_workbook(wb, dar_name, group):
+                if not fill_workbook(wb, dar_name, group, kind):
                     st.warning(
                         f"⚠️ تصنيف «{cat}»: تاريخ الفاتورة الأولى غير صالح (الصيغة"
                         " YYYY-MM-DD)، تم استخدام تاريخ اليوم في العنوان."
