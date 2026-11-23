@@ -157,7 +157,7 @@ def find_all_dates(full_text):
     def add(y, m, d):
         try:
             dt = datetime(int(y), int(m), int(d))
-            if 2000 <= dt.year <= 2100:
+            if 2024 <= dt.year <= 2027:
                 result.append(dt)
         except ValueError:
             pass
@@ -348,6 +348,21 @@ def normalize_decimals(text):
     return re.sub(r"(?<=\d),(?=\d{2}(?!\d))", ".", text or "")
 
 
+def clean_supplier(name):
+    """ينظّف اسم المورد المقروء بالـ OCR: يشيل الحروف اللاتينية والرموز الغريبة،
+    وإذا ما بقي اسم مفهوم (كلمتين عربي على الأقل) يرجّع فاضي بدل ما نكتب كلام خربان"""
+    name = re.sub(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", name or "")
+    name = re.sub(r"[A-Za-z0-9_|\\/\[\]{}()<>@#$%^&*=+~`\"]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip(" -:.,،؛")
+    words = [w for w in name.split() if re.search(r"[\u0600-\u06FF]", w)]
+    return " ".join(words) if len(words) >= 2 else ""
+
+
+def near_buyer_tax(t):
+    """رقم يختلف عن الرقم الضريبي للجمعية بخانة أو خانتين = غالباً هو نفسه بغلط OCR"""
+    return len(t) == len(BUYER_TAX) and sum(a != b for a, b in zip(t, BUYER_TAX)) <= 2
+
+
 BIZ_KEYS = r"(?:مؤسسة|شركة|مصنع|مكتب|مركز|معرض|ورشة|مطبعة|مكتبة|محلات|محل|للتجارة|للمقاولات|لحلول)"
 NOT_SUPPLIER = ("الجمعية", "جمعية", "الدور", "العميل", "فاتورة", "ضريبية", "تقرير", "الضمان", "الملاحظات")
 CUR = r"(?:\bSAR\b|\bSR\b|ر\.\s?س|ريال)"
@@ -370,7 +385,7 @@ def generic_extract(text, text_layer="", header=""):
 
     # الرقم الضريبي للمورد (نستبعد رقم الجمعية)
     for t in re.findall(r"(?<!\d)(3\d{14})(?!\d)", text + "\n" + layer):
-        if t != BUYER_TAX:
+        if t != BUYER_TAX and not near_buyer_tax(t):
             res["tax_no"] = t
             break
     if not res["tax_no"] and re.search(r"stc\.com\.sa", text + layer, re.I):
@@ -479,6 +494,8 @@ def generic_extract(text, text_layer="", header=""):
             if re.fullmatch(r"[\u0600-\u06FF\s]+", ln) and 2 <= len(ln.split()) <= 8 and ok_name(ln):
                 res["supplier"] = ln
                 break
+
+    res["supplier"] = clean_supplier(res["supplier"])
 
     return res
 
@@ -636,15 +653,16 @@ def ai_extract(uploaded_file):
             }
 
         types_list = " | ".join(INVOICE_TYPES.keys())
-        prompt = f"""اقرأ هذه الفاتورة (سعودية غالباً) وأرجع JSON فقط بدون أي شرح أو علامات ```.
+        prompt = f"""اقرأ هذه الفاتورة (سعودية غالباً، قد تكون صورة جوال لإيصال أو فاتورة ضريبية مبسطة) وأرجع JSON فقط بدون أي شرح أو علامات ```.
 المفاتيح:
-- "supplier": اسم المورد/الشركة البائعة
-- "inv_no": رقم الفاتورة
+- "supplier": اسم المورد/المحل البائع (مو اسم الجمعية العميلة)
+- "inv_no": رقم الفاتورة نفسها، وليس الرقم الضريبي ولا السجل التجاري ولا رقم الجوال ولا الباركود
 - "account_no": رقم الحساب أو العقد أو الاشتراك إن وُجد، وإلا ""
-- "inv_date": تاريخ الفاتورة الميلادي بصيغة YYYY-MM-DD (تجاهل التواريخ الهجرية وتواريخ الاستحقاق وفترة الاستهلاك)
-- "tax_no": الرقم الضريبي للمورد (15 رقم) إن وُجد، وإلا ""
-- "amount": المبلغ قبل ضريبة القيمة المضافة (رقم فقط)
-- "total": الإجمالي بعد الضريبة (رقم فقط)
+- "inv_date": تاريخ الفاتورة الميلادي بصيغة YYYY-MM-DD (تجاهل الهجري وتواريخ الاستحقاق وفترة الاستهلاك). التواريخ المكتوبة يوم/شهر/سنة
+- "tax_no": الرقم الضريبي للمورد (15 رقم يبدأ بـ 3) وليس رقم الجمعية 310834779300003، وإلا ""
+- "vat_free": true إذا الفاتورة ما فيها ضريبة قيمة مضافة، وإلا false
+- "amount": المبلغ قبل ضريبة القيمة المضافة (رقم فقط). إذا الفاتورة بدون ضريبة فهو الإجمالي
+- "total": الإجمالي النهائي المدفوع (رقم فقط)
 - "type": نوع الفاتورة، اختر واحداً بالضبط من: {types_list}
 حوّل الأرقام العربية (٠١٢٣) إلى إنجليزية. إذا لم تجد قيمة اتركها "" أو 0، ولا تخمّن."""
 
@@ -981,7 +999,7 @@ if uploaded_files:
         )
         if not include:
             continue
-        with st.expander("👁️ عرض صورة الفاتورة للمقارنة"):
+        with st.expander("👁️ صورة الفاتورة للمقارنة", expanded=True):
             prev = page_preview(file)
             if prev:
                 st.image(prev)
@@ -1016,10 +1034,12 @@ if uploaded_files:
                 "inv_date": ai.get("inv_date") or "",
                 "tax_no": ai.get("tax_no") or cfg["tax_no"],
                 "amount": amt,
+                "vat_free": bool(ai.get("vat_free")),
                 "raw_text": json.dumps(ai, ensure_ascii=False, indent=2),
                 "error": "",
             }
-            if amt and tot and abs(round(amt * (1 + VAT_RATE), 2) - tot) > 0.05:
+            if (not ext_data["vat_free"] and amt and tot
+                    and abs(round(amt * (1 + VAT_RATE), 2) - tot) > 0.05):
                 st.warning("⚠️ المبلغ + الضريبة 15% لا يطابق الإجمالي في الفاتورة، راجع المبلغ.")
         else:
             if ai and ai.get("error") not in (None, "no_key"):
@@ -1027,6 +1047,13 @@ if uploaded_files:
             ext_data = parse_pdf_invoice_robust(file, inv_type)
             if ext_data.get("note"):
                 st.info(f"ℹ️ {ext_data['note']}")
+            if file.name.lower().endswith((".png", ".jpg", ".jpeg")) or (
+                file.name.lower().endswith(".pdf") and not pdf_info(file)[1]
+            ):
+                st.warning(
+                    "⚠️ فاتورة ممسوحة/مصوّرة: القراءة المجانية غير دقيقة، قارن المبلغ "
+                    "والتاريخ ورقم الفاتورة بالصورة تحت قبل ما تكمل."
+                )
 
         if ext_data.get("error"):
             st.warning(f"⚠️ {ext_data['error']}")
@@ -1166,6 +1193,14 @@ if uploaded_files:
 
         for cat in cats_used:
             group = [it for it in invoices_data if it["category"] == cat]
+            blank = [it for it in group if not (
+                float(it["amount"] or 0) > 0 or it["supplier"].strip()
+                or str(it["inv_no"]).strip() or it["inv_date"].strip())]
+            if blank:
+                st.info(f"تصنيف «{cat}»: تم تجاهل {len(blank)} فاتورة فاضية (بدون مبلغ ولا مورد ولا تاريخ).")
+                group = [it for it in group if it not in blank]
+            if not group:
+                continue
             path = chosen_files.get(cat)
             try:
                 if not path or not os.path.exists(path):
