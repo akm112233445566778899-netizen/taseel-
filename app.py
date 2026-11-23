@@ -305,6 +305,33 @@ def ocr_header(uploaded_file):
         return ""
 
 
+# موردين معروفين: الرقم الضريبي -> (الاسم، نوع الفاتورة). أضف موردينك هنا
+KNOWN_SUPPLIERS = {
+    "300000157210003": ("شركة الاتصالات السعودية", "فاتورة هاتف / إنترنت"),
+    "300000361310003": ("الشركة السعودية للكهرباء", "فاتورة كهرباء"),
+}
+
+
+def decode_cid(text):
+    """بعض الـ PDF (مثل فواتير STC) تخزّن الأرقام بأكواد (cid:NN). هنا نفك الأرقام منها"""
+    if not text or "(cid:" not in text:
+        return text or ""
+
+    def r(m):
+        n = int(m.group(1))
+        if 19 <= n <= 28:
+            return str(n - 19)
+        return {15: ".", 16: "-", 17: ".", 18: "/", 3: " "}.get(n, "\u2022")
+
+    out = re.sub(r"\(cid:(\d+)\)", r, text)
+    return re.sub(r"\u2022+", " ", out)
+
+
+def normalize_decimals(text):
+    """الفاصلة العشرية (409,00) -> نقطة (409.00). ما تلمس الآلاف (1,000)"""
+    return re.sub(r"(?<=\d),(?=\d{2}(?!\d))", ".", text or "")
+
+
 BIZ_KEYS = r"(?:مؤسسة|شركة|مصنع|مكتب|مركز|معرض|ورشة|مطبعة|مكتبة|محلات|محل|للتجارة|للمقاولات|لحلول)"
 NOT_SUPPLIER = ("الجمعية", "جمعية", "الدور", "العميل", "فاتورة", "ضريبية", "تقرير", "الضمان", "الملاحظات")
 CUR = r"(?:\bSAR\b|\bSR\b|ر\.\s?س|ريال)"
@@ -313,9 +340,9 @@ CUR = r"(?:\bSAR\b|\bSR\b|ر\.\s?س|ريال)"
 def generic_extract(text, text_layer="", header=""):
     """استخراج عام من أي نص فاتورة. القيم الناقصة تبقى فاضية"""
     text = convert_arabic_digits(text)
-    layer = convert_arabic_digits(text_layer or "")
-    res = {"inv_no": "", "inv_date": "", "tax_no": "", "supplier": "",
-           "amount": 0.0, "note": "", "vat_free": False}
+    layer = normalize_decimals(convert_arabic_digits(decode_cid(text_layer or "")))
+    res = {"inv_no": "", "account_no": "", "inv_date": "", "tax_no": "",
+           "supplier": "", "amount": 0.0, "note": "", "vat_free": False}
 
     # مصادر النص بالترتيب: OCR، أعلى الصفحة، نص الـ PDF معكوس، نص الـ PDF
     # (عكس السطر يقلب الأرقام أيضاً، فنرجّع كل رقم لوضعه الصحيح)
@@ -326,10 +353,13 @@ def generic_extract(text, text_layer="", header=""):
     srcs = [text, convert_arabic_digits(header), convert_arabic_digits(rev_layer), layer]
 
     # الرقم الضريبي للمورد (نستبعد رقم الجمعية)
-    for t in re.findall(r"(?<!\d)(3\d{14})(?!\d)", text):
+    for t in re.findall(r"(?<!\d)(3\d{14})(?!\d)", text + "\n" + layer):
         if t != BUYER_TAX:
             res["tax_no"] = t
             break
+    if not res["tax_no"] and re.search(r"stc\.com\.sa", text + layer, re.I):
+        res["tax_no"] = "300000157210003"
+    known = KNOWN_SUPPLIERS.get(res["tax_no"])
 
     # المبلغ قبل الضريبة
     # 1) ثلاثية متطابقة: صافي + 15% = إجمالي
@@ -389,6 +419,15 @@ def generic_extract(text, text_layer="", header=""):
         if m:
             res["inv_no"] = m.group(1)
     if not res["inv_no"]:
+        # رقم تسلسلي بصيغة حساب-رقم مثل 634205470-182 (فواتير الاتصالات)
+        m = re.search(r"(?<!\d)(\d{9})\s*-\s*(\d{1,4})(?!\d)", layer)
+        if m:
+            res["inv_no"], res["account_no"] = f"{m.group(1)}-{m.group(2)}", m.group(1)
+        else:
+            m = re.search(r"(?<!\d)(\d{1,4})\s*-\s*(\d{9})(?!\d)", layer)
+            if m:
+                res["inv_no"], res["account_no"] = f"{m.group(2)}-{m.group(1)}", m.group(2)
+    if not res["inv_no"]:
         res["inv_no"] = find_inv(srcs[2:])
 
     # اسم المورد
@@ -398,7 +437,12 @@ def generic_extract(text, text_layer="", header=""):
     def ok_name(n):
         return len(n) > 6 and not any(w in n for w in NOT_SUPPLIER)
 
-    lines = text.split("\n") + (text_layer or "").split("\n") + [ln[::-1] for ln in (text_layer or "").split("\n")]
+    if known:
+        res["supplier"] = known[0]
+        return res
+    # نص الـ PDF أدق من OCR إذا كان سليم، فنجرّبه أول (معكوس ثم عادي)، وبعدها OCR
+    lines = ([ln[::-1] for ln in (text_layer or "").split("\n")]
+             + (text_layer or "").split("\n") + text.split("\n"))
     # أ) سطر فيه كلمة نشاط (مؤسسة/شركة/لحلول...): نأخذ السطر كامل إذا قصير ونظيف
     for line in lines:
         mk = re.search(BIZ_KEYS, line)
@@ -478,6 +522,7 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
                         "--- نص OCR ---\n" + ocr + "\n--- نص PDF ---\n" + full_text_raw
                     )
                     data["inv_no"] = g["inv_no"] or data["inv_no"]
+                    data["account_no"] = g["account_no"] or data["account_no"]
                     data["inv_date"] = g["inv_date"]
                     data["tax_no"] = g["tax_no"]
                     data["supplier"] = g["supplier"]
@@ -498,6 +543,7 @@ def parse_pdf_invoice_robust(uploaded_file, inv_type):
                 if ocr.strip() else full_text_raw
             )
             data["inv_no"] = g["inv_no"]
+            data["account_no"] = g["account_no"]
             data["inv_date"] = g["inv_date"]
             data["tax_no"] = g["tax_no"] or cfg["tax_no"]
             data["supplier"] = g["supplier"] or cfg["supplier"]
@@ -524,9 +570,13 @@ def detect_type_free(uploaded_file):
             if uploaded_file.name.lower().endswith(".pdf"):
                 with pdfplumber.open(uploaded_file) as pdf:
                     txt = convert_arabic_digits(
-                        "\n".join((pg.extract_text() or "") for pg in pdf.pages[:2])
+                        "\n".join((pg.extract_text() or "") for pg in pdf.pages[:4])
                     )
-                if re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", txt) and re.search(
+                dec = convert_arabic_digits(decode_cid(txt))
+                hit = next((v[1] for k, v in KNOWN_SUPPLIERS.items() if k in dec), None)
+                if hit:
+                    t = hit
+                elif re.search(r"(?<!\d)(2[05]\d{10})(?!\d)", txt) and re.search(
                     r"(?<!\d)30\d{9}(?!\d)", txt
                 ):
                     t = "فاتورة كهرباء"
