@@ -620,9 +620,12 @@ def detect_type_free(uploaded_file):
 
 
 # ----------------------------------------------------------------------
-# القراءة بالذكاء الاصطناعي عبر OpenRouter (نموذج Claude 3.5 Sonnet)
+# القراءة بالذكاء الاصطناعي (تقرأ أي فاتورة: PDF أو صورة)
+# مفتاح GEMINI_API_KEY (مجاني) أو ANTHROPIC_API_KEY في Secrets، وإذا ما وُجد يرجع للاستخراج القديم
 # ----------------------------------------------------------------------
-OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+AI_MODEL = "claude-sonnet-5-5"
+# موديلات Gemini بالترتيب (إذا الأول مشغول أو غير متاح يجرب الثاني)
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 
 def _ai_prompt():
@@ -656,69 +659,94 @@ def _secret(name):
         return None
 
 
-def _file_to_data_uri(uploaded_file):
-    """يحوّل الفاتورة (صورة أو PDF) إلى صورة JPEG بصيغة Base64 لإرسالها لـ OpenRouter"""
-    uploaded_file.seek(0)
-    name = uploaded_file.name.lower()
-    if name.endswith(".pdf"):
-        with pdfplumber.open(uploaded_file) as pdf:
-            img = pdf.pages[0].to_image(resolution=200).original.convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        raw = buf.getvalue()
-        mime = "image/jpeg"
-    else:
-        raw = uploaded_file.read()
-        mime = "image/png" if name.endswith(".png") else "image/jpeg"
-    b64 = base64.standard_b64encode(raw).decode("utf-8")
-    return f"data:{mime};base64,{b64}"
-
-
-def _openrouter_extract(uploaded_file, api_key):
+def _gemini_extract(raw, name, api_key):
+    """Google Gemini (فيه باقة مجانية). نستخدم REST مباشرة بدون مكتبات إضافية"""
     import urllib.request
     import urllib.error
 
-    data_uri = _file_to_data_uri(uploaded_file)
+    if name.endswith(".pdf"):
+        mime = "application/pdf"
+    elif name.endswith(".png"):
+        mime = "image/png"
+    else:
+        mime = "image/jpeg"
     body = {
-        "model": OPENROUTER_MODEL,
-        "temperature": 0,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _ai_prompt()},
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                ],
-            }
-        ],
+        "contents": [{"parts": [
+            {"inline_data": {"mime_type": mime, "data": base64.standard_b64encode(raw).decode()}},
+            {"text": _ai_prompt()},
+        ]}],
+        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
-    req = urllib.request.Request(
-        "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
-        data=json.dumps(body).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "[https://streamlit.app](https://streamlit.app)",
-            "X-Title": "Taseel",
-        },
+    last_err = None
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode(), method="POST",
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                data = json.loads(r.read().decode())
+            parts = data["candidates"][0]["content"]["parts"]
+            return _clean_json("".join(p.get("text", "") for p in parts))
+        except urllib.error.HTTPError as e:
+            last_err = f"{model}: HTTP {e.code} {e.read().decode(errors='ignore')[:200]}"
+            if e.code in (400, 401, 403):
+                break  # مفتاح غلط أو طلب غلط: ما يفيد نجرب موديل ثاني
+        except Exception as e:
+            last_err = f"{model}: {e}"
+    raise RuntimeError(last_err or "unknown")
+
+
+def _claude_extract(raw, name, api_key):
+    import anthropic
+
+    b64 = base64.standard_b64encode(raw).decode()
+    if name.endswith(".pdf"):
+        block = {"type": "document",
+                 "source": {"type": "base64", "media_type": "application/pdf", "data": b64}}
+    else:
+        media = "image/png" if name.endswith(".png") else "image/jpeg"
+        block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=AI_MODEL, max_tokens=1000,
+        messages=[{"role": "user", "content": [block, {"type": "text", "text": _ai_prompt()}]}],
     )
+    return _clean_json("".join(b.text for b in resp.content if b.type == "text"))
+
+
+def _shrink_for_ai(raw, name):
+    """يحوّل الصفحة لصورة JPEG بحجم معقول قبل الإرسال (يقلل التوكنز). إذا فشل يرجع الأصل"""
     try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        content = data["choices"][0]["message"]["content"]
-        return _clean_json(content)
-    except urllib.error.HTTPError as e:
-        err_msg = e.read().decode(errors="ignore")[:250]
-        raise RuntimeError(f"OpenRouter HTTP {e.code}: {err_msg}")
+        from PIL import Image
+
+        if name.endswith(".pdf"):
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                img = pdf.pages[0].to_image(resolution=130).original.convert("RGB")
+        else:
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((1600, 1600))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue(), "page.jpg"
+    except Exception:
+        return raw, name
 
 
 def ai_extract(uploaded_file):
-    api_key = _secret("OPENROUTER_API_KEY") or _secret("GEMINI_API_KEY")
-    if not api_key:
+    gem_key = _secret("GEMINI_API_KEY")
+    claude_key = _secret("ANTHROPIC_API_KEY")
+    if not gem_key and not claude_key:
         return {"error": "no_key"}
     try:
-        return _openrouter_extract(uploaded_file, api_key)
+        uploaded_file.seek(0)
+        raw = uploaded_file.read()
+        name = uploaded_file.name.lower()
+        raw, name = _shrink_for_ai(raw, name)
+        if gem_key:
+            return _gemini_extract(raw, name, gem_key)
+        return _claude_extract(raw, name, claude_key)
     except Exception as e:
         return {"error": f"تعذرت القراءة بالذكاء الاصطناعي: {e}"}
 
@@ -1322,5 +1350,5 @@ if uploaded_files:
             )
         st.link_button(
             "🌐 الذهاب إلى منصة فنار لإنشاء أمر الصرف",
-            "[https://fanar.gqb.org.sa/requests/home](https://fanar.gqb.org.sa/requests/home)",
+            "https://fanar.gqb.org.sa/requests/home",
         )
