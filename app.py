@@ -638,8 +638,9 @@ def _ai_prompt():
 - "inv_date": تاريخ الفاتورة الميلادي بصيغة YYYY-MM-DD (تجاهل الهجري وتواريخ الاستحقاق وفترة الاستهلاك). التواريخ المكتوبة يوم/شهر/سنة
 - "tax_no": الرقم الضريبي للمورد (15 رقم يبدأ بـ 3) وليس رقم الجمعية 310834779300003، وإلا ""
 - "vat_free": true إذا الفاتورة ما فيها ضريبة قيمة مضافة، وإلا false
-- "amount": المبلغ قبل ضريبة القيمة المضافة (رقم فقط). إذا الفاتورة بدون ضريبة فهو الإجمالي
-- "total": الإجمالي النهائي المدفوع (رقم فقط)
+- "amount": مبلغ الفاتورة الحالية فقط قبل ضريبة القيمة المضافة (رقم فقط)، بدون أي رصيد سابق. إذا الفاتورة بدون ضريبة فهو الإجمالي
+- "previous_balance": الرصيد أو الفاتورة السابقة غير المسددة المرحّلة وتُضاف للمبلغ المستحق (مثل فواتير الاتصالات)، رقم فقط، وإلا 0. لا تحسب عليه ضريبة جديدة. في فواتير الكهرباء والمياه والاتصالات ابحث عن: الرصيد السابق، المبلغ المتبقي، المتأخرات، الفاتورة السابقة
+- "total": المبلغ المستحق الكلي الذي يُدفع فعلاً (يشمل الرصيد السابق إن وُجد) (رقم فقط)
 - "type": نوع الفاتورة، اختر واحداً بالضبط من: {types_list}
 حوّل الأرقام العربية (٠١٢٣) إلى إنجليزية. إذا لم تجد قيمة اتركها "" أو 0، ولا تخمّن."""
 
@@ -709,11 +710,18 @@ def _claude_extract(raw, name, api_key):
         media = "image/png" if name.endswith(".png") else "image/jpeg"
         block = {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}}
     client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=AI_MODEL, max_tokens=1000,
-        messages=[{"role": "user", "content": [block, {"type": "text", "text": _ai_prompt()}]}],
-    )
-    return _clean_json("".join(b.text for b in resp.content if b.type == "text"))
+    last = None
+    for attempt in range(2):
+        resp = client.messages.create(
+            model=AI_MODEL, max_tokens=4000,
+            messages=[{"role": "user", "content": [block, {"type": "text", "text": _ai_prompt()}]}],
+        )
+        text = "".join(getattr(b, "text", "") or "" for b in resp.content if b.type == "text")
+        if "{" in text:
+            return _clean_json(text)
+        kinds = ",".join(b.type for b in resp.content) or "فاضي"
+        last = f"رد فاضي من Claude (سبب التوقف: {resp.stop_reason}، أنواع المحتوى: {kinds})"
+    raise RuntimeError(last)
 
 
 def _shrink_for_ai(raw, name):
@@ -818,6 +826,22 @@ def _data_end_row(ws, lay):
             r += 1
         return r
     return ws.max_row
+
+
+def expand_prev_balance(items):
+    """الرصيد السابق يُضاف كصف مستقل بدون ضريبة بعد صف الفاتورة الحالية"""
+    out = []
+    for it in items:
+        out.append(it)
+        prev = float(it.get("prev_balance") or 0)
+        if prev > 0:
+            extra = dict(it)
+            extra["statement"] = f"سداد رصيد سابق {it['supplier'].strip()}".strip()
+            extra["amount"] = prev
+            extra["prev_balance"] = 0
+            extra["vat_free"] = True
+            out.append(extra)
+    return out
 
 
 def fill_workbook(wb, dar_name, group, kind="تصفية"):
@@ -1146,8 +1170,9 @@ if uploaded_files:
             try:
                 amt = float(ai.get("amount") or 0)
                 tot = float(ai.get("total") or 0)
+                prev_bal = float(ai.get("previous_balance") or 0)
             except (TypeError, ValueError):
-                amt, tot = 0.0, 0.0
+                amt, tot, prev_bal = 0.0, 0.0, 0.0
             ext_data = {
                 "supplier": ai.get("supplier") or cfg["supplier"],
                 "inv_no": ai.get("inv_no") or "",
@@ -1155,12 +1180,13 @@ if uploaded_files:
                 "inv_date": ai.get("inv_date") or "",
                 "tax_no": ai.get("tax_no") or cfg["tax_no"],
                 "amount": amt,
+                "prev_balance": prev_bal,
                 "vat_free": bool(ai.get("vat_free")),
                 "raw_text": json.dumps(ai, ensure_ascii=False, indent=2),
                 "error": "",
             }
             if (not ext_data["vat_free"] and amt and tot
-                    and abs(round(amt * (1 + VAT_RATE), 2) - tot) > 0.05):
+                    and abs(round(amt * (1 + VAT_RATE) + prev_bal, 2) - tot) > 0.05):
                 st.warning("⚠️ المبلغ + الضريبة 15% لا يطابق الإجمالي في الفاتورة، راجع المبلغ.")
         else:
             if ai and ai.get("error") not in (None, "no_key"):
@@ -1224,6 +1250,15 @@ if uploaded_files:
                 key=f"amt_{fk}_{inv_type}",
             )
 
+            prev_balance = st.number_input(
+                f"الرصيد السابق (بدون ضريبة) #{idx+1} — إن وُجد",
+                value=float(ext_data.get("prev_balance", 0.0) or 0.0),
+                min_value=0.0,
+                step=0.01,
+                key=f"prev_{fk}_{inv_type}",
+                help="مثل فواتير الاتصالات: المبلغ المستحق = الفاتورة الحالية + ضريبتها + الرصيد السابق. يُضاف كصف مستقل بدون ضريبة.",
+            )
+
             # البيان: "سداد فاتورة" + اسم المورد (يتحدث لما تغيّر اسم المورد)
             statement = st.text_input(
                 f"البيان #{idx+1}",
@@ -1244,7 +1279,7 @@ if uploaded_files:
                 key=f"vf_{fk}_{inv_type}",
             )
             vat_part = 0.0 if vat_free else round(amount * VAT_RATE, 2)
-            estimated_total = round(amount + vat_part, 2)
+            estimated_total = round(amount + vat_part + prev_balance, 2)
             if estimated_total > 1500:
                 st.warning("⚠️ الفاتورة تزيد عن 1500 ريال، لازم ترفق عروض أسعار.")
             written_amount = tafqeet_arabic(estimated_total)
@@ -1260,6 +1295,7 @@ if uploaded_files:
             "account_no": account_no,
             "inv_date": inv_date,
             "amount": amount,
+            "prev_balance": prev_balance,
             "tax_no": tax_no,
             "statement": statement,
             "category": category,
@@ -1328,8 +1364,9 @@ if uploaded_files:
 
         if merge_all:
             # نرتّب حسب التصنيف عشان صفوف كل تصنيف تجي مع بعض (الترتيب داخل التصنيف يبقى نفسه)
-            group = [it for c in cats_used for it in invoices_data
-                     if it["category"] == c and not _is_blank(it)]
+            group = expand_prev_balance(
+                [it for c in cats_used for it in invoices_data
+                 if it["category"] == c and not _is_blank(it)])
             skipped = len(invoices_data) - len(group)
             if skipped:
                 st.info(f"تم تجاهل {skipped} فاتورة فاضية (بدون مبلغ ولا مورد ولا تاريخ).")
@@ -1361,6 +1398,7 @@ if uploaded_files:
                 group = [it for it in group if it not in blank]
             if not group:
                 continue
+            group = expand_prev_balance(group)
             path = chosen_files.get(cat)
             try:
                 if not path or not os.path.exists(path):
